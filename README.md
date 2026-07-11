@@ -6,7 +6,7 @@ so you can see the mechanics before wiring real data. **No live order placement
 ships in this repo** — that path is intentionally stubbed and gated.
 
 Domain language lives in [CONTEXT.md](CONTEXT.md); decisions in
-[docs/adr/](docs/adr/); architecture in [docs/architecture/](docs/architecture/).
+[docs/architecture/decisions/](docs/architecture/decisions/); architecture in [docs/architecture/](docs/architecture/).
 
 ## Blocks
 

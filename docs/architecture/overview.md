@@ -1,7 +1,7 @@
 # Architecture Overview (stub)
 
 > **Status: stub.** Derived from reading the existing code, schema,
-> [`CONTEXT.md`](../../CONTEXT.md), and [ADRs](../adr/) — not a full architect
+> [`CONTEXT.md`](../../CONTEXT.md), and [ADRs](./decisions/) — not a full architect
 > pass. It reflects the system *as it stands* plus the glossary/ADR decisions.
 > The dev-team architect should own and expand this (esp. WP-3's open question
 > and any live-mode design) rather than treat it as settled.

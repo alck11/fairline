@@ -2,15 +2,11 @@
 
 These work packages close the gaps a grilling pass found between the code and the
 decisions now recorded in [`CONTEXT.md`](../../CONTEXT.md) and
-[`docs/adr/`](../adr/). There is no `docs/product/requirements.md` yet, so work
+[`docs/architecture/decisions/`](./decisions/). There is no `docs/product/requirements.md` yet, so work
 packages are traced to **glossary terms and ADRs** rather than user stories.
 
 Ordering is by dependency then correctness-risk. Each package is independently
 reviewable and leaves the demos (`python3 src/<file>.py`) green.
-
-> Note: ADRs currently live in `docs/adr/`; they migrate to
-> `docs/architecture/decisions/` when the dev-team pipeline is adopted. Reference
-> them by number, not path.
 
 ---
 
