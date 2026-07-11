@@ -1,0 +1,8 @@
+pandas>=2.0
+numpy>=1.24
+xgboost>=2.0
+scipy>=1.10
+# integration (not needed to run the demos / tests):
+# py-clob-client      # Polymarket CLOB
+# psycopg[binary]     # Postgres/TimescaleDB
+# redis               # hot best-bid/ask state
