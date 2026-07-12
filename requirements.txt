@@ -1,6 +1,7 @@
 pandas>=2.0
 numpy>=1.24
 xgboost>=2.0
+scikit-learn>=1.3
 scipy>=1.10
 # integration (not needed to run the demos / tests):
 # py-clob-client      # Polymarket CLOB

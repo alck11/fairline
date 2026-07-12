@@ -143,7 +143,7 @@ SELECT create_hypertable('wallet_score', 'as_of',
 CREATE TABLE arb_opportunity (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     ts            TIMESTAMPTZ NOT NULL DEFAULT now(),
-    kind          TEXT NOT NULL,          -- 'bundle'|'cross_venue'|'multi'
+    kind          TEXT NOT NULL,          -- 'complete_set'|'cross_venue'
     legs          JSONB NOT NULL,         -- [{outcome_id,venue,side,price,size}]
     gross_edge    NUMERIC NOT NULL,       -- per $1 of payout
     total_fees    NUMERIC NOT NULL,

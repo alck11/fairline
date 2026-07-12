@@ -1,8 +1,8 @@
 """
-detector.py — fee-aware edge functions for the three arb shapes.
+detector.py — fee-aware edge functions for the two arb shapes.
 
 Edge is expressed two ways:
-  * net_edge  : guaranteed profit per $1 of payout (i.e. per pair/bundle of size 1)
+  * net_edge  : guaranteed profit per $1 of payout (i.e. per complete set of size 1)
   * roi       : net profit / capital actually deployed
 
 Key design choices
@@ -46,7 +46,7 @@ def vwap_fill(asks: Sequence[Level], target: float) -> tuple[float, float]:
 
 @dataclass
 class Opportunity:
-    kind: str                      # 'bundle' | 'cross_venue' | 'multi'
+    kind: str                      # 'complete_set' | 'cross_venue'
     size: float
     gross_edge: float              # per $1 payout, pre-fee
     total_fees: float
@@ -92,32 +92,17 @@ def cross_venue_edge(size: float, *,
     )
 
 
-def bundle_edge(size: float, *, venue: str, category: str,
-                yes_price: float, no_price: float,
-                yes_maker: bool = False, no_maker: bool = False) -> Opportunity:
-    """Buy YES and NO on the SAME venue (sum < $1)."""
-    legs = [
-        Leg(venue, size, yes_price, category, maker=yes_maker),
-        Leg(venue, size, no_price,  category, maker=no_maker),
-    ]
-    deployed, fees, net = _profit_for_legs(legs, size)
-    return Opportunity(
-        kind="bundle", size=size,
-        gross_edge=1.0 - (yes_price + no_price),
-        total_fees=fees, net_profit=net,
-        roi=(net / deployed) if deployed else 0.0,
-        legs=[{"venue": venue, "side": "yes", "price": yes_price, "size": size},
-              {"venue": venue, "side": "no",  "price": no_price,  "size": size}],
-    )
-
-
-def multi_outcome_edge(size: float, *, venue: str, category: str,
-                       prices: Sequence[float]) -> Opportunity:
-    """Buy one share of every outcome (sum of asks < $1). Exactly one pays $1."""
+def complete_set_edge(size: float, *, venue: str, category: str,
+                      prices: Sequence[float]) -> Opportunity:
+    """Buy one share of every outcome of a market, all on the SAME venue
+    (sum of asks < $1). Exactly one outcome pays $1, so the venue itself
+    guarantees settlement. Binary markets are just the size-2 case:
+    `prices=[yes_price, no_price]` — there is no separate shape for
+    binary vs. N-outcome, only the number of legs differs."""
     legs = [Leg(venue, size, p, category) for p in prices]
     deployed, fees, net = _profit_for_legs(legs, size)
     return Opportunity(
-        kind="multi", size=size,
+        kind="complete_set", size=size,
         gross_edge=1.0 - sum(prices),
         total_fees=fees, net_profit=net,
         roi=(net / deployed) if deployed else 0.0,
@@ -156,10 +141,18 @@ def best_cross_venue_size(yes_book: Sequence[Level], no_book: Sequence[Level], *
 
 
 if __name__ == "__main__":
+    # complete_set: buy every outcome on ONE venue for less than $1 (binary
+    # case here is just prices=[yes, no] — same shape as any N-outcome market).
+    cs = complete_set_edge(100, venue="polymarket", category="politics",
+                           prices=[0.42, 0.53])
+    print(f"complete_set: kind={cs.kind!r}  roi={cs.roi:6.2%}  net=${cs.net_profit:6.2f}")
+    assert cs.kind == "complete_set"
+
     # top-of-book looks great (5% gross) ...
     flat = cross_venue_edge(100, yes_venue="polymarket", yes_price=0.42, yes_cat="politics",
                             no_venue="kalshi", no_price=0.53, no_cat="politics")
-    print(f"flat   : roi={flat.roi:6.2%}  net=${flat.net_profit:6.2f}")
+    print(f"cross_venue : kind={flat.kind!r}  roi={flat.roi:6.2%}  net=${flat.net_profit:6.2f}")
+    assert flat.kind == "cross_venue"
 
     # ... but thin books eat it. Depth-aware sizing tells the truth:
     yes_book = [(0.42, 60), (0.44, 80), (0.47, 200)]
@@ -169,7 +162,7 @@ if __name__ == "__main__":
                                   yes_cat="politics", no_cat="politics",
                                   min_roi=0.01, step=10, max_size=400)
     if depth:
-        print(f"depth  : size={depth.size:.0f}  roi={depth.roi:6.2%}  "
+        print(f"depth       : size={depth.size:.0f}  roi={depth.roi:6.2%}  "
               f"net=${depth.net_profit:6.2f}")
     else:
-        print("depth  : no size clears the 1% buffer after slippage")
+        print("depth       : no size clears the 1% buffer after slippage")

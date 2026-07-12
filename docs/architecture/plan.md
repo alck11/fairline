@@ -117,7 +117,7 @@ engine stays killed until `rearm()` is called.
 **Changes**
 - [`README.md`](../../README.md): retitle to `fairline`, update the file table to
   reflect the collapsed arb kinds (WP-1) and triage-only matcher (WP-2).
-- Add a one-line pointer to `CONTEXT.md` and `docs/adr/`.
+- Add a one-line pointer to `CONTEXT.md` and `docs/architecture/decisions/`.
 
 **Testing:** none (docs).
 
