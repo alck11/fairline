@@ -129,19 +129,44 @@ counts. Both documented as intentionally-reproducing regression tests in
 
 ---
 
-## WP-5 — Kill switch latches in live mode
+## WP-5 — Kill switch latches in live mode ✅ (done 2026-07-12)
 
 **Traces to:** ADR-0001, CONTEXT.md → _Kill switch_.
 **Why:** `_roll_day` clears `kill` at the UTC day roll in *both* modes. Live must
 require manual re-arm; auto-reset is paper-only (unattended replays).
 
-**Changes**
-- [`src/risk_execution.py`](../../src/risk_execution.py): in `_roll_day`, only
-  auto-clear `kill` when `self.mode == "paper"`. Add an explicit `rearm()` method
-  for the live/human path.
+**Delivered:** [`src/risk_execution.py`](../../src/risk_execution.py) —
+`_roll_day(self, mode)` only auto-clears `kill` when `mode == "paper"`;
+`realized_today` still resets unconditionally every day roll in both modes.
+New `Engine.rearm()` — the explicit human/live re-arm path — clears both `kill`
+and `realized_today` together (a human re-arming is domain-equivalent to
+"start the day's loss accounting fresh from here," the same semantic
+`_roll_day` already applies automatically at UTC midnight in paper mode).
+New [`tests/test_risk_execution_killswitch.py`](../../tests/test_risk_execution_killswitch.py)
+(standalone, matches `test_risk_execution_consensus.py`'s conventions).
 
-**Testing:** paper engine auto-resets `kill` across a simulated day roll; live
-engine stays killed until `rearm()` is called.
+**Testing:** QA FAIL → fix → PASS. First pass caught a Major bug: `rearm()`
+cleared `kill` but left the stale negative `realized_today` in place, so the
+very next `settle()` call — even one settling a brand-new profit, same day, no
+roll — re-tripped the kill switch against the carried-over value, making
+`rearm()` non-functional beyond a single `_check()` window. Fixed by having
+`rearm()` reset `realized_today` too. Re-verified: paper auto-resets `kill`
+across a simulated day roll; live stays latched across multiple consecutive
+day rolls until `rearm()` is called; `realized_today` still resets every day
+roll in both modes (unaffected by the fix); `_check`/`execute_arb`/`_fill`/
+`_unwind`/`consensus_gate`/`execute_copy` byte-identical throughout.
+
+**Follow-up (QA-flagged, not fixed — accepted tradeoff, not a bug):**
+`rearm()` unconditionally zeroes `realized_today` with no gating on whether
+`kill` was actually set, and no cap on how often it's called. A human calling
+`rearm()` repeatedly after each trip effectively grants a fresh daily-loss
+budget each time (verified: 5× `settle(-90)`+`rearm()` loop absorbs -$450
+against a $100 limit), and calling `rearm()` when `kill` is still `False`
+silently zeroes legitimate accumulated loss too. Since `rearm()` is explicitly
+the human-reviewed manual path, this is a defensible tradeoff rather than a
+defect — but nothing currently logs the masked loss at rearm time or rate-
+limits rearm calls. Worth a product/architecture decision if live placement is
+ever built.
 
 ---
 
@@ -188,6 +213,7 @@ no-edge case returning None. **Follow-up:** a `signal` audit table; a real
 ## Suggested sequence
 
 WP-1 → WP-2 → WP-4 → WP-5 → WP-3 (architecture call) → WP-6.
-WP-5 is self-contained; WP-3 needs an architect ruling; WP-6 last so it
-describes the finished state. WP-1/2/4/7/8 are already done; WP-6's README pass
-should also cover the three new ingestion/EV modules.
+Only WP-3 remains, and it needs an architect ruling before an executor should
+touch it; WP-6 goes last so it describes the finished state. WP-1/2/4/5/7/8 are
+already done; WP-6's README pass should also cover the three new ingestion/EV
+modules.

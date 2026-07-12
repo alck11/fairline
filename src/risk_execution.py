@@ -39,10 +39,17 @@ class RiskState:
     kill: bool = False
     _day: str = field(default_factory=lambda: datetime.now(timezone.utc).date().isoformat())
 
-    def _roll_day(self):
+    def _roll_day(self, mode: str = "paper"):
         today = datetime.now(timezone.utc).date().isoformat()
         if today != self._day:
-            self._day, self.realized_today, self.kill = today, 0.0, False
+            self._day, self.realized_today = today, 0.0
+            # Auto-reset of the kill switch is paper-only: unattended historical
+            # replays would otherwise starve on the first daily-loss trip. In
+            # live mode the switch latches across the day roll -- a human must
+            # call Engine.rearm() (see ADR-0001: "a kill switch that un-kills
+            # itself is a daily loss budget, not a kill switch").
+            if mode == "paper":
+                self.kill = False
 
 
 def consensus_gate(agree_count: int, participant_count: int, basket_size: int,
@@ -76,7 +83,7 @@ class Engine:
 
     # -- gating ------------------------------------------------------------
     def _check(self, notional: float, wallet: str | None) -> tuple[bool, str]:
-        self.state._roll_day()
+        self.state._roll_day(self.mode)
         L, S = self.limits, self.state
         if S.kill:
             return False, "kill switch active (daily loss limit hit)"
@@ -125,10 +132,33 @@ class Engine:
 
     def settle(self, pnl: float):
         """Call when a position resolves; trips kill switch past the loss limit."""
-        self.state._roll_day()
+        self.state._roll_day(self.mode)
         self.state.realized_today += pnl
         if self.state.realized_today <= -self.limits.daily_loss_limit:
             self.state.kill = True
+
+    def rearm(self):
+        """Explicit human re-arm of the kill switch (the live/manual path).
+
+        Always clears `kill`, regardless of mode. In live mode this is the
+        *only* way to clear a tripped kill switch -- `_roll_day` deliberately
+        will not do it. Allowed in paper too, for consistency and so the
+        state machine is testable without depending on mode.
+
+        Also resets `realized_today` to 0.0. A human re-arming is implicitly
+        declaring "start the day's loss accounting fresh from here" -- the
+        same semantic `_roll_day` applies at the UTC day roll, just manually
+        triggered instead of waiting for midnight. Without this, the stale
+        deeply-negative `realized_today` that tripped the switch is still
+        sitting there, so the very next `settle()` call -- even one settling
+        a brand-new profit -- immediately re-latches `kill` (the loss-limit
+        check in `settle()` re-runs on every call, unconditionally). Only the
+        kill-switch/daily-loss-counter pair is touched here; exposure, wallet
+        allocation and every other risk-state field are left exactly as they
+        were.
+        """
+        self.state.kill = False
+        self.state.realized_today = 0.0
 
     # -- internals ---------------------------------------------------------
     def _fill(self, leg: dict) -> dict:
@@ -186,3 +216,23 @@ if __name__ == "__main__":
 
     eng.settle(-350.0)
     print("after big loss, kill switch:", eng.state.kill)
+
+    # -- WP-5: kill switch latches in live mode --------------------------
+    # A day roll is simulated by back-dating RiskState._day rather than
+    # sleeping past UTC midnight; _roll_day() only reacts to _day changing.
+
+    paper_eng = Engine(RiskLimits(daily_loss_limit=100), mode="paper")
+    paper_eng.settle(-150.0)
+    print("\npaper: kill after big loss           :", paper_eng.state.kill)
+    paper_eng.state._day = "2000-01-01"          # force the next roll to fire
+    paper_eng.settle(0.0)                        # any call that rolls the day
+    print("paper: kill after day roll (auto-reset):", paper_eng.state.kill)
+
+    live_eng = Engine(RiskLimits(daily_loss_limit=100), mode="live")
+    live_eng.settle(-150.0)
+    print("\nlive : kill after big loss           :", live_eng.state.kill)
+    live_eng.state._day = "2000-01-01"           # force the next roll to fire
+    live_eng.settle(0.0)
+    print("live : kill after day roll (latched)   :", live_eng.state.kill)
+    live_eng.rearm()
+    print("live : kill after rearm()              :", live_eng.state.kill)
