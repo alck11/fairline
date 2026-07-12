@@ -104,28 +104,50 @@ def train_xgb(table: pd.DataFrame, n_splits: int = 4):
 # basket construction: never bet the farm on one wallet
 # ---------------------------------------------------------------------------
 def build_basket(scored: pd.DataFrame, category: str, *, top_k: int = 8,
-                 min_score: float = 70.0) -> list[str]:
-    """Top-k specialists in a category whose composite score clears a floor.
+                 min_score: float = 70.0, min_share: float = 0.5,
+                 min_category_trades: int = 5) -> list[str]:
+    """Top-k wallets specialized in `category` whose composite score clears a
+    floor (ADR-0007: a specialism filter over the single Score, not
+    per-category scores). A wallet enters this basket only if `category` is
+    its dominant_category (a majority of its resolved trades), which keeps
+    ranking survivors by the overall `score` honest — for a specialist, the
+    Score is mostly that category's performance anyway.
+
     Trade signal fires only when >=80% of the basket agrees on an outcome
     (enforced in your execution layer, not here)."""
-    pool = scored[(scored["score"] >= min_score)].copy()
-    # category specialism: prefer wallets concentrated in this category
+    pool = scored[
+        (scored["dominant_category"] == category)
+        & (scored["dominant_category_share"] >= min_share)
+        & (scored["dominant_category_n"] >= min_category_trades)
+        & (scored["score"] >= min_score)
+    ].copy()
     pool = pool.sort_values("score", ascending=False)
     return pool["wallet"].head(top_k).tolist()
 
 
 if __name__ == "__main__":
+    from wallet_features import composite_score
+
     rng = np.random.default_rng(11)
     n = 12000
+    categories = ["politics", "sports", "crypto"]
     wallets = [f"0x{i:03x}" for i in range(120)]
     skill = {w: rng.normal(0, 0.15) for w in wallets}     # latent per-wallet edge
+    # Give each wallet a "home" category it trades most of the time, with some
+    # cross-category noise mixed in — uniformly-random categories per trade
+    # would make almost every wallet diversified and every basket empty
+    # (ADR-0007 / plan.md WP-3 demo note).
+    home_category = {w: categories[i % len(categories)] for i, w in enumerate(wallets)}
     entry = pd.Timestamp("2026-01-01", tz="UTC") + pd.to_timedelta(rng.integers(0, 330, n), "D")
     w = rng.choice(wallets, n)
+    home_col = np.array([home_category[x] for x in w])
+    is_noise = rng.random(n) < 0.2
+    category_col = np.where(is_noise, rng.choice(categories, n), home_col)
     price = rng.uniform(0.2, 0.8, n).round(2)
     # win prob nudged by latent skill -> learnable but noisy signal
     pwin = np.clip(price + [skill[x] for x in w] + rng.normal(0, 0.1, n), 0.02, 0.98)
     demo = pd.DataFrame({
-        "wallet": w, "category": rng.choice(["politics", "sports", "crypto"], n),
+        "wallet": w, "category": category_col,
         "size": rng.integers(10, 400, n).astype(float),
         "entry_price": price, "entry_ts": entry,
         "resolved_value": (rng.uniform(0, 1, n) < pwin).astype(float),
@@ -141,3 +163,21 @@ if __name__ == "__main__":
         print(f"out-of-time Spearman per fold: {[round(c, 3) for c in cv]}")
     except ImportError:
         print("(install xgboost + scipy to run the model; composite score works without it)")
+
+    # --- basket demo (ADR-0007): a specialism filter over the single Score ---
+    # `table` already carries dominant_category/_share/_n from features_for_wallet
+    # (selection metadata, deliberately excluded from FEATURE_COLS above).
+    latest = table[table["as_of"] == grid[-1]].copy()
+    scored = composite_score(latest)
+    print(f"\nbasket demo as_of={grid[-1].date()}  ({len(scored)} scored wallets)")
+    baskets = {}
+    for cat in ["crypto", "politics"]:
+        basket = build_basket(scored, cat)
+        baskets[cat] = basket
+        by_wallet = scored.set_index("wallet")
+        all_match = all(by_wallet.loc[wl, "dominant_category"] == cat for wl in basket)
+        print(f"basket[{cat}] ({len(basket)} wallets, all dominant_category=={cat}: {all_match}): {basket}")
+
+    disjoint = set(baskets["crypto"]).isdisjoint(baskets["politics"])
+    print(f"crypto and politics baskets are non-empty and disjoint: "
+          f"{bool(baskets['crypto']) and bool(baskets['politics']) and disjoint}")

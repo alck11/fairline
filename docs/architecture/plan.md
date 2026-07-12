@@ -68,24 +68,86 @@ wasn't accidentally loosened. No other module (`risk_execution.py`,
 
 ---
 
-## WP-3 — Baskets are category-scoped
+## WP-3 — Baskets are category-scoped ✅ (done 2026-07-12)
 
-**Traces to:** ADR (basket scope), CONTEXT.md → _Basket_.
+**Traces to:** ADR-0007 (basket scope), ADR-0003 (leakage/survivorship),
+CONTEXT.md → _Basket_.
 **Why:** `build_basket` takes `category` but ignores it; baskets are meant to be
 top-k specialists *within* a category.
 
+**Decision (ADR-0007):** a **specialism filter over the single Score**, not
+per-category scores. Keep the one composite `score` as the ranking; make
+`category` a *selection* filter that admits only wallets genuinely concentrated
+in that category. Per-category rescoring (the "more correct" option) is rejected
+as premature complexity that also contradicts the glossary's single-Score
+definition and worsens the ADR-0003 min-sample/survivorship discipline; it stays
+open as future work only if the base copy strategy proves edge *and* per-category
+skill divergence is shown to matter. See ADR-0007 for the full rationale.
+
+The specialism metadata is derived from the history `features_for_wallet` has
+**already** point-in-time-filtered (`resolve_ts < as_of`), so it inherits
+ADR-0003's no-leakage guarantee for free and touches neither the forward label
+nor the CV.
+
 **Changes**
-- [`src/wallet_scoring.py`](../../src/wallet_scoring.py) `build_basket`: actually
-  filter/rank by category specialism. Needs a per-(wallet, category) signal — the
-  feature panel currently aggregates categories per wallet. Either (a) compute
-  per-category scores, or (b) use `hhi_category` + the wallet's dominant category
-  as a specialism proxy. **Architect decision needed** on which; flag it rather
-  than improvising.
+- [`src/wallet_features.py`](../../src/wallet_features.py) `features_for_wallet`:
+  add three columns computed from the already-filtered `hist` (do **not** change
+  the `hist`/`resolve_ts < as_of` filter, and do **not** touch `forward_label`):
+  - `dominant_category` — the category with the most resolved trades; break ties
+    deterministically (e.g. highest total stake, then lexical) so panels are
+    reproducible.
+  - `dominant_category_share` — that category's fraction of the wallet's resolved
+    trades (`max(value_counts(normalize=True))`).
+  - `dominant_category_n` — its resolved-trade count.
+  Leave `hhi_category` unchanged. These columns flow through `build_feature_panel`
+  (it just collects the dicts) and survive `composite_score` (it only adds
+  `score`), so they reach `build_basket` on the `scored` frame.
+- [`src/wallet_scoring.py`](../../src/wallet_scoring.py): **do not** add the new
+  columns to `FEATURE_COLS` — they are selection metadata, not model features
+  (`dominant_category` is a string and would break the regressor; per-category
+  ROI as an ML feature is a separate later question). `FEATURE_COLS`,
+  `forward_label`, `build_training_table`, and the purged CV stay untouched.
+  Rewrite `build_basket` to:
+  ```python
+  def build_basket(scored, category, *, top_k=8, min_score=70.0,
+                   min_share=0.5, min_category_trades=5):
+      pool = scored[
+          (scored["dominant_category"] == category)
+          & (scored["dominant_category_share"] >= min_share)
+          & (scored["dominant_category_n"] >= min_category_trades)
+          & (scored["score"] >= min_score)
+      ].copy()
+      pool = pool.sort_values("score", ascending=False)
+      return pool["wallet"].head(top_k).tolist()
+  ```
+  Defaults: `min_share=0.5` (a specialist trades a majority in one category),
+  `min_category_trades=5` (mirrors the existing `len(hist) >= 5` sample floor,
+  now applied *within* the category), `min_score=70.0` unchanged. A wallet is a
+  specialist in at most one category, so it belongs to at most one basket —
+  consistent with "one basket per category."
+- **Demo data must produce specialists.** Uniformly-random trade categories
+  (`rng.choice([...])` per trade, as in both `__main__` blocks today) yield
+  almost no wallet clearing a 0.5 share floor, so every basket comes back empty.
+  Update the `wallet_scoring.py` demo generator (and `wallet_features.py`'s if
+  used in the test) to give each wallet a *home* category it trades with high
+  probability, so distinct, non-empty baskets exist to demonstrate.
 
-**Testing:** two baskets for two categories return different, category-appropriate
-wallet sets on the demo data.
+**Testing:** QA PASS — two baskets for two categories return **different**,
+category-appropriate wallet sets on the (specialism-bearing) demo data (8
+crypto + 8 politics, zero overlap, all 120 wallets checked pairwise-disjoint
+across all 3 demo categories with no score floor applied); every wallet
+returned for `category=X` has `dominant_category == X`; a deliberately
+diversified wallet (share < `min_share`) appears in **neither** basket; an
+unspecialized category returns `[]` gracefully. Leakage boundary re-verified
+directly: a wallet with 5 pre-`as_of` "politics" trades and 100 higher-volume
+post-`as_of` "crypto" trades still resolves to `dominant_category=="politics"`
+— confirms zero leakage from ADR-0003's `resolve_ts < as_of` filter. Tie-break
+(count → stake → lexical) verified deterministic across `PYTHONHASHSEED`
+variations. `FEATURE_COLS`, `forward_label`, `build_training_table`, and the
+purged CV are byte-identical; the xgboost path is unaffected. New regression
+test: [`tests/test_wallet_basket_specialism.py`](../../tests/test_wallet_basket_specialism.py).
 
-**Blocked-by:** none, but the (a)/(b) choice is an architecture call.
+**Blocked-by:** none — architecture call resolved by ADR-0007.
 
 ---
 
@@ -212,8 +274,8 @@ no-edge case returning None. **Follow-up:** a `signal` audit table; a real
 
 ## Suggested sequence
 
-WP-1 → WP-2 → WP-4 → WP-5 → WP-3 (architecture call) → WP-6.
-Only WP-3 remains, and it needs an architect ruling before an executor should
-touch it; WP-6 goes last so it describes the finished state. WP-1/2/4/5/7/8 are
-already done; WP-6's README pass should also cover the three new ingestion/EV
-modules.
+WP-1 → WP-2 → WP-4 → WP-5 → WP-3 → WP-6.
+Only WP-6 remains — it goes last so it describes the finished state.
+WP-1/2/3/4/5/7/8 are all done; WP-6's README pass should cover the collapsed
+arb kinds, the triage-only matcher, category-scoped baskets, and the three new
+ingestion/EV modules.

@@ -57,6 +57,21 @@ def _hhi(category_counts: pd.Series) -> float:
     return float((p ** 2).sum())
 
 
+def _dominant_category(hist: pd.DataFrame) -> tuple[str, float, int]:
+    """The category with the most resolved trades in `hist`, deterministically
+    tie-broken (highest total stake, then lexical) so the panel is
+    reproducible run-to-run. Returns (category, share, n)."""
+    counts = hist["category"].value_counts()
+    top_n = int(counts.max())
+    candidates = sorted(counts[counts == top_n].index)
+    if len(candidates) > 1:
+        stakes = hist[hist["category"].isin(candidates)].groupby("category")["stake"].sum()
+        top_stake = stakes.max()
+        candidates = sorted(stakes[stakes == top_stake].index)
+    category = candidates[0]
+    return category, float(top_n / len(hist)), top_n
+
+
 def features_for_wallet(df: pd.DataFrame, as_of: pd.Timestamp) -> dict | None:
     """Compute one feature dict from a single wallet's prepped trades,
     using only trades resolved before `as_of`. Returns None if too sparse."""
@@ -73,6 +88,8 @@ def features_for_wallet(df: pd.DataFrame, as_of: pd.Timestamp) -> dict | None:
         cut = as_of - pd.Timedelta(days=days)
         return float(hist.loc[hist["resolve_ts"] >= cut, "pnl"].sum())
 
+    dom_category, dom_share, dom_n = _dominant_category(hist)
+
     return {
         "as_of": as_of,
         "wallet": hist["wallet"].iloc[0],
@@ -88,6 +105,11 @@ def features_for_wallet(df: pd.DataFrame, as_of: pd.Timestamp) -> dict | None:
         "pnl_30d": _recent(30),
         "pnl_90d": _recent(90),
         "longest_loss_streak": _longest_loss_streak(wins.tolist()),
+        # Selection metadata for baskets (ADR-0007) — NOT model features:
+        # dominant_category is a string and would break the regressor.
+        "dominant_category": dom_category,
+        "dominant_category_share": dom_share,
+        "dominant_category_n": dom_n,
     }
 
 
@@ -141,9 +163,21 @@ def composite_score(panel: pd.DataFrame) -> pd.DataFrame:
 if __name__ == "__main__":
     rng = np.random.default_rng(7)
     n = 600
+    categories = ["politics", "sports", "crypto"]
+    wallets = [f"0x{i:02x}" for i in range(40)]
+    # Give each wallet a "home" category it trades most of the time, with some
+    # cross-category noise mixed in — uniformly-random categories per trade
+    # would make almost every wallet diversified and every basket empty
+    # (ADR-0007 / plan.md WP-3 demo note).
+    home_category = {w: categories[i % len(categories)] for i, w in enumerate(wallets)}
+    wallet_col = rng.choice(wallets, n)
+    home_col = np.array([home_category[w] for w in wallet_col])
+    is_noise = rng.random(n) < 0.2
+    category_col = np.where(is_noise, rng.choice(categories, n), home_col)
+
     demo = pd.DataFrame({
-        "wallet": rng.choice([f"0x{i:02x}" for i in range(40)], n),
-        "category": rng.choice(["politics", "sports", "crypto"], n),
+        "wallet": wallet_col,
+        "category": category_col,
         "size": rng.integers(10, 500, n).astype(float),
         "entry_price": rng.uniform(0.2, 0.8, n).round(2),
         "entry_ts": pd.Timestamp("2026-01-01", tz="UTC") + pd.to_timedelta(rng.integers(0, 120, n), "D"),
@@ -153,4 +187,6 @@ if __name__ == "__main__":
     demo["resolve_ts"] = demo["entry_ts"] + pd.to_timedelta(rng.integers(1, 240, n), "h")
     panel = build_feature_panel(demo, [pd.Timestamp("2026-05-01", tz="UTC")])
     scored = composite_score(panel).sort_values("score", ascending=False)
-    print(scored[["wallet", "n_resolved", "win_rate", "roi", "sharpe", "score"]].head(8).to_string(index=False))
+    print(scored[["wallet", "n_resolved", "win_rate", "roi", "sharpe", "score",
+                  "dominant_category", "dominant_category_share", "dominant_category_n"]]
+          .head(8).to_string(index=False))
