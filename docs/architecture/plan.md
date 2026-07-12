@@ -89,7 +89,7 @@ wallet sets on the demo data.
 
 ---
 
-## WP-4 — Consensus needs a participation floor
+## WP-4 — Consensus needs a participation floor ✅ (done 2026-07-11)
 
 **Traces to:** ADR (consensus, option C), CONTEXT.md → _Consensus_,
 _Participation_.
@@ -97,14 +97,35 @@ _Participation_.
 alone reads as 100% consensus. Consensus must be agreement among *participants*,
 valid only above a floor.
 
-**Changes**
-- [`src/risk_execution.py`](../../src/risk_execution.py): add a consensus helper
-  (or accept `(agree_count, participant_count, basket_size)`), compute
-  `agree/participants`, and reject when `participants < floor` or consensus < gate.
-  Add `min_participation` to `RiskLimits` (default e.g. 3).
+**Delivered:** [`src/risk_execution.py`](../../src/risk_execution.py) — added
+`min_participation: int = 3` to `RiskLimits`; new `consensus_gate(agree_count,
+participant_count, basket_size, limits) -> (bool, float, str)` rejects
+unconditionally when `participant_count < min_participation`, otherwise gates
+`agree_count/participant_count` (never diluted by `basket_size`) against
+`basket_consensus`. `execute_copy`'s signature changed to
+`(wallet, leg, agree_count, participant_count, basket_size)` — no other caller
+existed in the repo, confirmed by grep. First regression test added:
+[`tests/test_risk_execution_consensus.py`](../../tests/test_risk_execution_consensus.py)
+(standalone, no pytest dependency — matches the repo's `python3 <file>.py`
+convention).
 
-**Testing:** 1-of-1 participation is rejected (below floor); 4-of-5 agreeing
-passes; 3-of-8 (whole-basket denom would fail) still evaluated on participants.
+**Testing:** QA PASS — 1-of-1 participation rejected (below floor) even at
+100% agreement; 4-of-5 passes; 3-of-8 (3 participants out of an 8-member
+basket, whole-basket denominator would fail the gate at 0.375) passes when
+correctly evaluated on participants (3/3 = 1.0). Both the floor boundary
+(`participant_count == min_participation`) and the consensus boundary
+(`agreement == basket_consensus`) are inclusive and tested. `_check`,
+`execute_arb`, kill switch, and all other risk-gate logic verified untouched.
+
+**Follow-up (QA-flagged, not fixed — minor, doesn't trigger under any default
+config):** `consensus_gate(0, 0, ..., RiskLimits(min_participation=0))` raises
+`ZeroDivisionError` instead of failing gracefully, since `min_participation=0`
+("no floor") makes the floor check `0 < 0 → False` and falls through to the
+division. Also, `agree_count > participant_count` or `participant_count >
+basket_size` (nonsensical inputs) are silently accepted rather than validated —
+could mask an upstream counting bug in whatever eventually supplies these
+counts. Both documented as intentionally-reproducing regression tests in
+`tests/test_risk_execution_consensus.py` rather than silently fixed.
 
 ---
 
@@ -167,6 +188,6 @@ no-edge case returning None. **Follow-up:** a `signal` audit table; a real
 ## Suggested sequence
 
 WP-1 → WP-2 → WP-4 → WP-5 → WP-3 (architecture call) → WP-6.
-WP-4/5 are self-contained; WP-3 needs an architect ruling; WP-6 last so it
-describes the finished state. WP-1/2/7/8 are already done; WP-6's README pass
+WP-5 is self-contained; WP-3 needs an architect ruling; WP-6 last so it
+describes the finished state. WP-1/2/4/7/8 are already done; WP-6's README pass
 should also cover the three new ingestion/EV modules.

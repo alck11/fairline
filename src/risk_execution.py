@@ -10,7 +10,9 @@ Risk model
   * per-trade notional cap and per-wallet allocation cap
   * global max open exposure
   * daily loss limit -> trips the kill switch (no new entries)
-  * basket-consensus gate for copy trades (>=80% agreement)
+  * basket-consensus gate for copy trades (>=80% agreement among
+    *participants*, only valid once participation clears a floor — one
+    wallet trading alone is not consensus, however it agrees with itself)
   * partial-fill handling: an arb that fills only ONE leg is NOT an arb;
     abort and unwind rather than carry naked directional risk.
 """
@@ -26,6 +28,7 @@ class RiskLimits:
     max_open_exposure: float = 5_000.0
     daily_loss_limit: float = 300.0
     basket_consensus: float = 0.80
+    min_participation: int = 3
 
 
 @dataclass
@@ -40,6 +43,28 @@ class RiskState:
         today = datetime.now(timezone.utc).date().isoformat()
         if today != self._day:
             self._day, self.realized_today, self.kill = today, 0.0, False
+
+
+def consensus_gate(agree_count: int, participant_count: int, basket_size: int,
+                    limits: RiskLimits) -> tuple[bool, float, str]:
+    """Evaluate basket consensus for a copy trade.
+
+    Consensus is agreement among *participants* (basket members who actually
+    traded the market), never diluted by the silent rest of the basket. It is
+    only meaningful once participation clears `limits.min_participation` — one
+    wallet trading alone is not consensus, however much it agrees with itself.
+    Returns (passed, agreement_fraction, reason).
+    """
+    if participant_count < limits.min_participation:
+        return False, 0.0, (
+            f"participation {participant_count}/{basket_size} < floor "
+            f"{limits.min_participation}")
+    agreement = agree_count / participant_count
+    if agreement < limits.basket_consensus:
+        return False, agreement, (
+            f"consensus {agreement:.0%} ({agree_count}/{participant_count} "
+            f"participants) < {limits.basket_consensus:.0%}")
+    return True, agreement, "ok"
 
 
 class Engine:
@@ -83,11 +108,12 @@ class Engine:
         return self._record("filled", fills, opp.net_profit, "paper arb filled")
 
     # -- copy execution ----------------------------------------------------
-    def execute_copy(self, wallet: str, leg: dict, basket_agreement: float) -> dict:
-        if basket_agreement < self.limits.basket_consensus:
-            return self._record("rejected", [leg], 0.0,
-                                 f"consensus {basket_agreement:.0%} < "
-                                 f"{self.limits.basket_consensus:.0%}")
+    def execute_copy(self, wallet: str, leg: dict, agree_count: int,
+                      participant_count: int, basket_size: int) -> dict:
+        ok, _agreement, why = consensus_gate(agree_count, participant_count,
+                                              basket_size, self.limits)
+        if not ok:
+            return self._record("rejected", [leg], 0.0, why)
         notional = leg["price"] * leg["size"]
         ok, why = self._check(notional, wallet=wallet)
         if not ok:
@@ -136,8 +162,27 @@ if __name__ == "__main__":
                            no_price=0.53, no_cat="politics")
     print("arb  :", eng.execute_arb(opp)["status"], "->",
           eng.execute_arb(opp)["notes"])              # rejected: notional 95 ok? 95<200 -> filled
-    print("copy :", eng.execute_copy("0xabc",
-          {"venue": "polymarket", "side": "yes", "price": 0.30, "size": 100},
-          basket_agreement=0.9)["status"])
+
+    copy_leg = {"venue": "polymarket", "side": "yes", "price": 0.30, "size": 100}
+
+    # (a) 1-of-1: a single wallet agreeing with itself is 100% "agreement" but
+    # is not consensus -- below the participation floor, must reject.
+    r = eng.execute_copy("0xabc", copy_leg, agree_count=1, participant_count=1,
+                          basket_size=10)
+    print("copy a (1-of-1, floor breach)  :", r["status"], "->", r["notes"])
+
+    # (b) 4-of-5: well above the floor and above the consensus gate -> passes.
+    r = eng.execute_copy("0xabc", copy_leg, agree_count=4, participant_count=5,
+                          basket_size=10)
+    print("copy b (4-of-5)                :", r["status"], "->", r["notes"])
+
+    # (c) 3-of-8: only 3 of the 8-member basket traded, but 3 clears the floor
+    # and all 3 agree -- consensus is evaluated on participants (3), not
+    # diluted by the 5 silent members (which would fail 3/8 < 0.80 under the
+    # old whole-basket denominator).
+    r = eng.execute_copy("0xabc", copy_leg, agree_count=3, participant_count=3,
+                          basket_size=8)
+    print("copy c (3-of-8 basket, 3-of-3 participants):", r["status"], "->", r["notes"])
+
     eng.settle(-350.0)
     print("after big loss, kill switch:", eng.state.kill)

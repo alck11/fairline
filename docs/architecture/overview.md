@@ -144,7 +144,10 @@ relationships (see CONTEXT.md for canonical definitions):
 - **Config:** risk limits are a `RiskLimits` dataclass; venue fee coefficients
   are module constants in `fees.py`.
 - **Testing:** each module is importable and self-demos via `__main__` on
-  synthetic data; matcher routing is tested with injected fakes. **Gap:** no test
-  suite yet — the plan's WPs specify per-package assertions; a `tests/` harness is
-  a candidate v0.2 item.
+  synthetic data; matcher routing is tested with injected fakes. A `tests/`
+  directory now exists (`tests/test_risk_execution_consensus.py`, added during
+  WP-4 QA) — standalone, no pytest dependency, matching the repo's
+  `python3 <file>.py` convention. **Gap:** only one module has dedicated
+  regression tests so far; extending this harness to the rest of the WPs is
+  still a candidate v0.2 item.
 - **Logging / observability:** not yet designed.
