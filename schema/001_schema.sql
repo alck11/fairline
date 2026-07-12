@@ -44,14 +44,15 @@ CREATE TABLE outcome (
 );
 
 -- Cross-venue equivalence: "these two outcomes are the same real-world event."
--- Written by the market matcher (Ollama proposes, Claude confirms ambiguous).
+-- Written by the market matcher: embeddings only triage (discard or escalate);
+-- only Claude (reading both resolution rule-sets) or a human writes a link (ADR-0002).
 CREATE TABLE market_link (
     link_id       BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     outcome_a     BIGINT NOT NULL REFERENCES outcome(outcome_id),
     outcome_b     BIGINT NOT NULL REFERENCES outcome(outcome_id),
     polarity      SMALLINT NOT NULL DEFAULT 1,   -- 1: a==b ; -1: a == NOT b
     confidence    NUMERIC NOT NULL,              -- 0..1
-    method        TEXT NOT NULL,                 -- 'embedding','llm','manual'
+    method        TEXT NOT NULL,                 -- 'llm','manual' (never 'embedding' — ADR-0002)
     verified      BOOLEAN NOT NULL DEFAULT false,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (outcome_a <> outcome_b),

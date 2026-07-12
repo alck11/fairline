@@ -3,24 +3,27 @@ market_matcher.py — decide when two markets are the SAME real-world event.
 
 This is the highest-leverage correctness problem in cross-venue arb: a wrong
 match isn't a missed trade, it's a guaranteed loss when the venues resolve
-differently. So the design is cheap-local-first, escalate-the-ambiguous:
+differently. Embeddings can't reliably distinguish negation or three-way
+outcomes ("cut" vs "hold" vs "raise" embed as near-identical but are NOT
+complements), so the embedding tier only TRIAGES — it never writes a link.
+Only the LLM (reading both resolution rule-sets) or a human may write one.
+See ADR-0002.
 
     1. embed both questions locally (Ollama) -> cosine similarity
-    2. high sim  -> auto-link (confidence from similarity)
-       low  sim  -> discard
-       middle    -> escalate to Claude API to read BOTH resolution rule-sets
+       low  sim  -> discard, not a match
+       otherwise -> escalate to Claude API to read BOTH resolution rule-sets
                     and return {same: bool, polarity: +1/-1, confidence}
 
 Only the routing logic is implemented here; the two model calls are marked
 with TODO and isolated behind small functions so you can wire in your own
 Ollama endpoint and Anthropic key. Mirrors a local/remote split: trivial
-judgments stay local, hard ones go to the strong model.
+judgments (discard) stay local, every judgment that could become a link goes
+to the strong model.
 """
 from __future__ import annotations
 from dataclasses import dataclass
 
-AUTO_LINK = 0.92      # >= this cosine -> link without asking the LLM
-ESCALATE = 0.70       # [ESCALATE, AUTO_LINK) -> ask Claude ; below -> discard
+ESCALATE = 0.70       # >= this cosine -> ask Claude ; below -> discard
 
 
 @dataclass
@@ -28,7 +31,7 @@ class MatchResult:
     same: bool
     polarity: int          # +1: a==b ; -1: a == NOT b
     confidence: float
-    method: str            # 'embedding' | 'llm'
+    method: str            # 'llm' | 'manual' (embeddings never write a link)
 
 
 def embed(text: str) -> list[float]:
@@ -58,10 +61,13 @@ def match(q_a: str, rules_a: str, q_b: str, rules_b: str,
           *, embedder=embed, confirmer=confirm_with_llm) -> MatchResult | None:
     """Route a candidate pair. Returns a MatchResult to persist into
     market_link, or None to discard. `embedder`/`confirmer` are injectable
-    so you can unit-test the routing with fakes."""
+    so you can unit-test the routing with fakes.
+
+    Triage only: embeddings decide discard-vs-escalate, never same/polarity.
+    Any pair that clears the floor is escalated to the LLM (or, eventually,
+    a human) to read both resolution rule-sets — that is the only path
+    allowed to write a link. See ADR-0002."""
     sim = cosine(embedder(q_a), embedder(q_b))
-    if sim >= AUTO_LINK:
-        return MatchResult(True, +1, sim, "embedding")
     if sim < ESCALATE:
         return None
     return confirmer(q_a, rules_a, q_b, rules_b)
@@ -74,6 +80,6 @@ if __name__ == "__main__":
     fake_confirm = lambda *_: MatchResult(True, +1, 0.81, "llm")
 
     print("near-identical ->", match("a", "", "b", "",
-          embedder=fake_embed, confirmer=fake_confirm))   # auto-link via embedding
+          embedder=fake_embed, confirmer=fake_confirm))   # escalated to the LLM fake
     print("orthogonal     ->", match("a", "", "c", "",
           embedder=fake_embed, confirmer=fake_confirm))   # discarded (None)

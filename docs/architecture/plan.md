@@ -10,46 +10,61 @@ reviewable and leaves the demos (`python3 src/<file>.py`) green.
 
 ---
 
-## WP-1 — Collapse arb taxonomy to `complete_set | cross_venue`
+## WP-1 — Collapse arb taxonomy to `complete_set | cross_venue` ✅ (done 2026-07-11)
 
 **Traces to:** ADR (arb taxonomy), CONTEXT.md → _Complete set_, _Cross-venue_.
 **Why:** `bundle` and `multi` are the same structure (a within-venue complete
 set); the split is an implementation detail, not a domain distinction.
 
-**Changes**
-- [`src/detector.py`](../../src/detector.py): merge `bundle_edge` and
-  `multi_outcome_edge` into one `complete_set_edge(size, *, venue, category,
-  prices: Sequence[float])` — the binary case is just `prices=[yes, no]`. Set
-  `kind="complete_set"`. Keep `cross_venue_edge` as-is.
-- [`schema/001_schema.sql`](../../schema/001_schema.sql): update the
-  `arb_opportunity.kind` comment to `'complete_set'|'cross_venue'`.
-- Update the `__main__` demo to call `complete_set_edge`.
+**Delivered:** [`src/detector.py`](../../src/detector.py) — merged
+`bundle_edge` and `multi_outcome_edge` into `complete_set_edge(size, *, venue,
+category, prices: Sequence[float])` (binary case is `prices=[yes, no]`),
+`kind="complete_set"`; `cross_venue_edge` left byte-identical.
+[`schema/001_schema.sql`](../../schema/001_schema.sql) comment and
+[`README.md`](../../README.md)'s detector row updated to match; `__main__`
+demo now asserts both `kind` literals.
 
-**Testing:** demo prints a within-venue complete-set opportunity and a
-cross-venue one; assert `kind` values are exactly the two allowed strings.
+**Testing:** QA PASS — demo prints a within-venue complete-set opportunity and
+a cross-venue one with the exact two allowed `kind` strings; no `"bundle"`/
+`"multi"` references remain in code; downstream consumers (`ev_detector.py`,
+`risk_execution.py`) don't read `Opportunity.kind` so nothing broke there.
 
-**Gotcha:** `Opportunity.kind` is a bare string used in two places (dataclass
-+ SQL). Grep for `"bundle"`, `"multi"` before finishing.
+**Follow-up (QA-flagged, needs an architect ruling):** the merged
+`complete_set_edge` signature dropped the `yes_maker`/`no_maker` params the old
+`bundle_edge` had — a within-venue complete set can no longer be priced with
+resting (fee-free, rebate-earning) maker legs, only taker. Nothing in the repo
+currently calls it with `maker=True`, so nothing is broken today, but decide
+whether `complete_set_edge` should regain per-leg `maker` flags before this is
+used for real. Separately, `complete_set_edge(prices=[])` silently returns a
+fake full-notional "profit" instead of erroring — pre-existing (inherited
+unchanged from the old code), not introduced by this merge, but worth an empty-
+legs guard whenever this function is next touched.
 
 ---
 
-## WP-2 — Matcher: embeddings triage only, never auto-link
+## WP-2 — Matcher: embeddings triage only, never auto-link ✅ (done 2026-07-11)
 
 **Traces to:** ADR-0002, CONTEXT.md → _Triage_, _Escalate_, _Match_.
 **Why:** auto-linking at cosine ≥ 0.92 with hardcoded polarity +1 produces
 guaranteed losses on negation/three-way markets (cut/hold/raise). Only reading
 both resolution rule-sets can write a link.
 
-**Changes**
-- [`src/market_matcher.py`](../../src/market_matcher.py): in `match()`, remove the
-  `sim >= AUTO_LINK → MatchResult(...,"embedding")` branch. New routing:
-  `sim < ESCALATE` → `None` (discard); otherwise → `confirmer(...)`. Retire the
-  `AUTO_LINK` constant (or repurpose as an upper triage bound if useful).
-- Ensure written `MatchResult.method` is only `'llm'` (confirmer) — `'manual'`
-  stays reserved for human inserts. `'embedding'` is no longer a link method.
+**Delivered:** [`src/market_matcher.py`](../../src/market_matcher.py) — removed
+the `sim >= AUTO_LINK → MatchResult(...,"embedding")` branch entirely; `AUTO_LINK`
+retired (no repurposed use needed). New routing: `sim < ESCALATE` → `None`
+(discard); `sim >= ESCALATE` → `confirmer(...)`, always. Only `'llm'` (confirmer)
+and `'manual'` (human inserts elsewhere) remain possible `MatchResult.method`
+values. [`README.md`](../../README.md)'s matcher row and
+[`schema/001_schema.sql`](../../schema/001_schema.sql)'s `market_link.method`
+comment updated to match — `'embedding'` is no longer documented as a valid
+method anywhere.
 
-**Testing:** routing test — a near-identical pair now **escalates** (calls the
-confirmer fake) instead of auto-linking; an orthogonal pair still discards.
+**Testing:** QA PASS — near-identical pair now **escalates** (`method='llm'`)
+instead of auto-linking; orthogonal pair still discards to `None`; boundary
+case `sim == ESCALATE` confirmed to escalate (not discard), consistent with the
+`>=` semantics; `ESCALATE` constant itself unchanged (0.70), so the triage floor
+wasn't accidentally loosened. No other module (`risk_execution.py`,
+`ev_detector.py`) depends on `AUTO_LINK` or assumes `method="embedding"`.
 
 ---
 
@@ -152,6 +167,6 @@ no-edge case returning None. **Follow-up:** a `signal` audit table; a real
 ## Suggested sequence
 
 WP-1 → WP-2 → WP-4 → WP-5 → WP-3 (architecture call) → WP-6.
-WP-1/2/4/5 are self-contained; WP-3 needs an architect ruling; WP-6 last so it
-describes the finished state. WP-7/WP-8 were independent of WP-1–6 and are
-already done; WP-6's README pass should also cover the three new modules.
+WP-4/5 are self-contained; WP-3 needs an architect ruling; WP-6 last so it
+describes the finished state. WP-1/2/7/8 are already done; WP-6's README pass
+should also cover the three new ingestion/EV modules.

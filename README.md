@@ -20,7 +20,7 @@ Domain language lives in [CONTEXT.md](CONTEXT.md); decisions in
 | `src/detector.py` | Detection | Fee-aware edge for complete-set / cross-venue arb, plus depth-aware sizing that walks the book to find the profit-*maximizing* size after slippage. |
 | `src/wallet_features.py` | Scoring (features) | Point-in-time, leakage-safe features (fee-adjusted PnL, Sharpe, drawdown, recency PnL, category HHI, loss streaks) + a transparent percentile composite score. |
 | `src/wallet_scoring.py` | Scoring (model) | Forward-label construction, purged time-series CV, XGBoost training, and basket construction. Beats-the-baseline gate before you trust it. |
-| `src/market_matcher.py` | Matching | Hybrid routing: local Ollama embeddings auto-link the obvious, Claude confirms the ambiguous by reading both resolution rule-sets. |
+| `src/market_matcher.py` | Matching | Triage-only routing: local Ollama embeddings discard the unrelated or escalate everything else; only Claude (reading both resolution rule-sets) or a human ever writes a link (ADR-0002). |
 | `src/risk_execution.py` | Execution + risk | Paper-trade engine with notional/exposure/wallet caps, daily-loss kill switch, basket-consensus gate, and atomic both-legs-or-neither arb handling. |
 
 ## Setup
