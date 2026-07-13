@@ -232,17 +232,22 @@ ever built.
 
 ---
 
-## WP-6 — README & naming cleanup
+## WP-6 — README & naming cleanup ✅ (done 2026-07-13)
 
 **Traces to:** CONTEXT.md header (name decision).
 **Why:** README title still says `polymkt-arb`; `fairline` is canonical.
 
-**Changes**
-- [`README.md`](../../README.md): retitle to `fairline`, update the file table to
-  reflect the collapsed arb kinds (WP-1) and triage-only matcher (WP-2).
-- Add a one-line pointer to `CONTEXT.md` and `docs/architecture/decisions/`.
+**Delivered:** [`README.md`](../../README.md) title, ADR pointer, collapsed
+arb-kind row (WP-1), and triage-only matcher row (WP-2) were already correct —
+carried along incidentally by the WP-1/WP-2 commits. The one gap was WP-3
+(done after those rows were last touched): the `wallet_features.py` and
+`wallet_scoring.py` rows didn't mention category-scoped baskets. Updated both
+rows to note the dominant-category features and the category-scoped,
+ADR-0007-gated `build_basket`.
 
-**Testing:** none (docs).
+**Testing:** none (docs) — re-ran `src/wallet_scoring.py`'s demo to confirm
+the row's description (disjoint, category-appropriate, non-empty baskets)
+still matches current behavior.
 
 ---
 
@@ -275,7 +280,6 @@ no-edge case returning None. **Follow-up:** a `signal` audit table; a real
 ## Suggested sequence
 
 WP-1 → WP-2 → WP-4 → WP-5 → WP-3 → WP-6.
-Only WP-6 remains — it goes last so it describes the finished state.
-WP-1/2/3/4/5/7/8 are all done; WP-6's README pass should cover the collapsed
-arb kinds, the triage-only matcher, category-scoped baskets, and the three new
+All work packages (WP-1 through WP-8) are done. README reflects the collapsed
+arb kinds, the triage-only matcher, category-scoped baskets, and the three
 ingestion/EV modules.
