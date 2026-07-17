@@ -15,6 +15,13 @@ CONTEXT.md's "Kill switch" glossary entry:
     `kill` untouched (the day-roll bookkeeping isn't fully skipped, only the
     kill-switch auto-clear is)
   - rearm() clears `kill` unconditionally, including in paper mode
+
+Also covers the WP-5 follow-up fix (2026-07-17): rearm() previously had no
+audit trail and no limit on how many times it could be called per day, so a
+human could loop settle(loss)+rearm() to absorb unbounded daily loss past
+`daily_loss_limit`. rearm() now logs every call (blocked or not) with the
+masked-loss amount, and RiskLimits.max_rearms_per_day (default 1) caps
+successful rearms per calendar day, raising RuntimeError once exhausted.
 """
 import sys
 import os
@@ -128,6 +135,64 @@ def test_live_kill_blocks_new_entries_until_rearmed():
     check(ok is True, f"after rearm(), entries must be allowed again, got {ok!r}/{why!r}")
 
 
+def test_rearm_logs_masked_loss_to_the_blotter():
+    """Every rearm() call must leave an audit row recording the realized_today
+    value it's about to zero out and whether kill was actually set -- this is
+    the previously-missing observability the WP-5 follow-up flagged."""
+    eng = Engine(RiskLimits(daily_loss_limit=100), mode="live")
+    eng.settle(-150.0)
+    row = eng.rearm()
+    check(row["status"] == "rearm", f"expected status 'rearm', got {row['status']!r}")
+    check("masked loss $-150.00" in row["notes"],
+          f"rearm() log must record the masked realized_today, got {row['notes']!r}")
+    check("kill was set" in row["notes"],
+          f"rearm() log must record kill was actually tripped, got {row['notes']!r}")
+    check(row in eng.blotter, "rearm() audit row must land in the blotter")
+
+
+def test_rearm_beyond_daily_cap_raises_and_leaves_state_untouched():
+    """RiskLimits.max_rearms_per_day (default 1) caps successful rearms per
+    calendar day. A second same-day rearm() must raise RuntimeError rather
+    than silently no-op -- so a human hitting the cap notices instead of
+    assuming the switch cleared -- and must not further mutate state."""
+    eng = Engine(RiskLimits(daily_loss_limit=100), mode="live")
+    eng.settle(-150.0)
+    eng.rearm()  # first rearm today: allowed (cap defaults to 1)
+    check(eng.state.kill is False, "sanity: first rearm() succeeds")
+
+    eng.settle(-150.0)  # trip it again, same day
+    check(eng.state.kill is True, "sanity: kill re-trips on a second big loss")
+
+    try:
+        eng.rearm()
+        raise AssertionError("expected RuntimeError once max_rearms_per_day is exhausted")
+    except RuntimeError:
+        pass
+    check(eng.state.kill is True, "blocked rearm() must leave kill latched")
+    check(eng.state.realized_today == -150.0,
+          f"blocked rearm() must not reset realized_today, got {eng.state.realized_today}")
+
+    blocked_row = eng.blotter[-1]
+    check(blocked_row["status"] == "rearm_blocked",
+          f"blocked rearm() must still log an audit row, got {blocked_row['status']!r}")
+
+
+def test_rearm_cap_resets_at_day_roll():
+    """The rearm counter is a daily counter like realized_today -- it resets
+    at the same UTC day roll, so a fresh day gets a fresh rearm budget."""
+    eng = Engine(RiskLimits(daily_loss_limit=100, max_rearms_per_day=1), mode="live")
+    eng.settle(-150.0)
+    eng.rearm()
+    check(eng.state.rearms_today == 1, "sanity: one rearm used today")
+
+    eng.state._day = "2000-01-01"  # force the next roll to fire
+    eng.settle(-150.0)  # this call triggers the day roll, then re-trips kill
+    check(eng.state.rearms_today == 0, "rearms_today must reset at the day roll")
+
+    eng.rearm()  # must succeed again: fresh day, fresh budget
+    check(eng.state.kill is False, "rearm() must succeed on the new day's fresh budget")
+
+
 if __name__ == "__main__":
     tests = [
         test_paper_auto_resets_kill_at_day_roll,
@@ -137,6 +202,9 @@ if __name__ == "__main__":
         test_rearm_also_works_in_paper_mode,
         test_rearm_resets_realized_today_so_it_does_not_self_relatch,
         test_live_kill_blocks_new_entries_until_rearmed,
+        test_rearm_logs_masked_loss_to_the_blotter,
+        test_rearm_beyond_daily_cap_raises_and_leaves_state_untouched,
+        test_rearm_cap_resets_at_day_roll,
     ]
     failures = 0
     for t in tests:

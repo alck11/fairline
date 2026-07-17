@@ -29,6 +29,7 @@ class RiskLimits:
     daily_loss_limit: float = 300.0
     basket_consensus: float = 0.80
     min_participation: int = 3
+    max_rearms_per_day: int = 1
 
 
 @dataclass
@@ -37,12 +38,13 @@ class RiskState:
     realized_today: float = 0.0
     wallet_alloc: dict[str, float] = field(default_factory=dict)
     kill: bool = False
+    rearms_today: int = 0
     _day: str = field(default_factory=lambda: datetime.now(timezone.utc).date().isoformat())
 
     def _roll_day(self, mode: str = "paper"):
         today = datetime.now(timezone.utc).date().isoformat()
         if today != self._day:
-            self._day, self.realized_today = today, 0.0
+            self._day, self.realized_today, self.rearms_today = today, 0.0, 0
             # Auto-reset of the kill switch is paper-only: unattended historical
             # replays would otherwise starve on the first daily-loss trip. In
             # live mode the switch latches across the day roll -- a human must
@@ -152,28 +154,58 @@ class Engine:
         if self.state.realized_today <= -self.limits.daily_loss_limit:
             self.state.kill = True
 
-    def rearm(self):
+    def rearm(self) -> dict:
         """Explicit human re-arm of the kill switch (the live/manual path).
 
-        Always clears `kill`, regardless of mode. In live mode this is the
-        *only* way to clear a tripped kill switch -- `_roll_day` deliberately
-        will not do it. Allowed in paper too, for consistency and so the
-        state machine is testable without depending on mode.
+        Clears `kill` and resets `realized_today` to 0.0, regardless of mode.
+        In live mode this is the *only* way to clear a tripped kill switch --
+        `_roll_day` deliberately will not do it. Allowed in paper too, for
+        consistency and so the state machine is testable without depending on
+        mode. A human re-arming is implicitly declaring "start the day's loss
+        accounting fresh from here" -- the same semantic `_roll_day` applies
+        at the UTC day roll, just manually triggered instead of waiting for
+        midnight. Without the `realized_today` reset, the stale deeply-negative
+        value that tripped the switch would still be sitting there, so the
+        very next `settle()` call -- even one settling a brand-new profit --
+        would immediately re-latch `kill`.
 
-        Also resets `realized_today` to 0.0. A human re-arming is implicitly
-        declaring "start the day's loss accounting fresh from here" -- the
-        same semantic `_roll_day` applies at the UTC day roll, just manually
-        triggered instead of waiting for midnight. Without this, the stale
-        deeply-negative `realized_today` that tripped the switch is still
-        sitting there, so the very next `settle()` call -- even one settling
-        a brand-new profit -- immediately re-latches `kill` (the loss-limit
-        check in `settle()` re-runs on every call, unconditionally). Only the
-        kill-switch/daily-loss-counter pair is touched here; exposure, wallet
-        allocation and every other risk-state field are left exactly as they
-        were.
+        Every call -- successful or blocked -- is logged to the blotter
+        (status `"rearm"` / `"rearm_blocked"`) recording the `realized_today`
+        value being zeroed (the masked loss) and whether `kill` was actually
+        set, per WP-5's follow-up: nothing previously made a rearm's masked
+        loss visible after the fact.
+
+        `RiskLimits.max_rearms_per_day` (default 1) caps how many times this
+        can succeed per calendar day, resetting at the same day roll that
+        resets `realized_today`. Looping `settle(loss)` + `rearm()` would
+        otherwise let a human absorb unbounded daily loss past
+        `daily_loss_limit` one rearm at a time -- the same "a kill switch
+        that un-kills itself is a daily loss budget, not a kill switch"
+        problem ADR-0001 raised for the automatic paper-mode reset, just via
+        repeated manual calls instead. Once the cap is hit, `rearm()` raises
+        `RuntimeError` rather than silently no-op'ing, so a human hitting the
+        cap in a real emergency notices immediately instead of assuming the
+        switch cleared. Only the kill-switch/daily-loss-counter/rearm-counter
+        triple is touched here; exposure, wallet allocation and every other
+        risk-state field are left exactly as they were.
         """
-        self.state.kill = False
-        self.state.realized_today = 0.0
+        self.state._roll_day(self.mode)
+        S, L = self.state, self.limits
+        masked_loss, was_tripped = S.realized_today, S.kill
+        note = (f"masked loss ${masked_loss:.2f}; kill was "
+                f"{'set' if was_tripped else 'NOT set'}")
+        if S.rearms_today >= L.max_rearms_per_day:
+            row = self._record(
+                "rearm_blocked", [], 0.0,
+                f"rearm() blocked: {S.rearms_today}/{L.max_rearms_per_day} "
+                f"rearm(s) already used today; {note}")
+            raise RuntimeError(row["notes"])
+        S.rearms_today += 1
+        S.kill = False
+        S.realized_today = 0.0
+        return self._record(
+            "rearm", [], 0.0,
+            f"rearm() #{S.rearms_today}/{L.max_rearms_per_day} today; {note}")
 
     # -- internals ---------------------------------------------------------
     def _fill(self, leg: dict) -> dict:

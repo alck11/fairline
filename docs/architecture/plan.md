@@ -229,17 +229,23 @@ day rolls until `rearm()` is called; `realized_today` still resets every day
 roll in both modes (unaffected by the fix); `_check`/`execute_arb`/`_fill`/
 `_unwind`/`consensus_gate`/`execute_copy` byte-identical throughout.
 
-**Follow-up (QA-flagged, not fixed — accepted tradeoff, not a bug):**
-`rearm()` unconditionally zeroes `realized_today` with no gating on whether
-`kill` was actually set, and no cap on how often it's called. A human calling
-`rearm()` repeatedly after each trip effectively grants a fresh daily-loss
-budget each time (verified: 5× `settle(-90)`+`rearm()` loop absorbs -$450
-against a $100 limit), and calling `rearm()` when `kill` is still `False`
-silently zeroes legitimate accumulated loss too. Since `rearm()` is explicitly
-the human-reviewed manual path, this is a defensible tradeoff rather than a
-defect — but nothing currently logs the masked loss at rearm time or rate-
-limits rearm calls. Worth a product/architecture decision if live placement is
-ever built.
+**Follow-up resolved (2026-07-17):** product decision (log + rate-limit,
+chosen over log-only, no-op-when-not-tripped, and leave-as-is) — `rearm()`
+now logs every call, successful or blocked, to the blotter (status `"rearm"`
+/ `"rearm_blocked"`) recording the `realized_today` value being zeroed (the
+masked loss) and whether `kill` was actually set. New
+`RiskLimits.max_rearms_per_day: int = 1` caps successful rearms per calendar
+day; the counter (`RiskState.rearms_today`) resets at the same day roll that
+resets `realized_today`. Once the cap is exhausted, `rearm()` raises
+`RuntimeError` instead of silently no-op'ing, closing the loop that let a
+human absorb unbounded daily loss one rearm at a time (previously verified:
+5× `settle(-90)`+`rearm()` absorbed -$450 against a $100 limit). `rearm()`'s
+return type changed from `None` to the audit-row `dict`; no caller in the
+repo used the return value, and no test calls `rearm()` more than once per
+engine per day, so the default cap doesn't break existing behavior. Three new
+regression tests added to `tests/test_risk_execution_killswitch.py`:
+log content, cap enforcement (raises, leaves state untouched), and cap reset
+at the day roll.
 
 ---
 
