@@ -61,7 +61,22 @@ def consensus_gate(agree_count: int, participant_count: int, basket_size: int,
     only meaningful once participation clears `limits.min_participation` — one
     wallet trading alone is not consensus, however much it agrees with itself.
     Returns (passed, agreement_fraction, reason).
+
+    Raises `ValueError` if the counts are internally inconsistent (negative,
+    `agree_count > participant_count`, or `participant_count > basket_size`)
+    — those shapes can only come from an upstream counting bug and must not
+    be silently gated as if they were a legitimate low-consensus basket.
     """
+    if agree_count < 0 or participant_count < 0 or basket_size < 0:
+        raise ValueError("agree_count, participant_count and basket_size must be >= 0")
+    if participant_count > basket_size:
+        raise ValueError(
+            f"participant_count {participant_count} exceeds basket_size {basket_size}")
+    if agree_count > participant_count:
+        raise ValueError(
+            f"agree_count {agree_count} exceeds participant_count {participant_count}")
+    if participant_count == 0:
+        return False, 0.0, f"no participants (0/{basket_size})"
     if participant_count < limits.min_participation:
         return False, 0.0, (
             f"participation {participant_count}/{basket_size} < floor "

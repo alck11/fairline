@@ -12,13 +12,14 @@ Traces to docs/architecture/plan.md WP-4 acceptance criteria:
   - floor comparison is participant_count < min_participation (inclusive floor)
   - consensus comparison is agreement < basket_consensus (inclusive gate)
 
-Also probes inputs the spec does not explicitly cover, to document actual
-(not assumed) behavior for inputs a caller could plausibly pass:
-  - participant_count == 0
-  - agree_count > participant_count
-  - participant_count > basket_size
-  - negative counts
-  - min_participation == 0 (i.e. "no floor" configuration)
+Also covers inputs the spec does not explicitly enumerate, including two
+follow-up fixes (2026-07-17) for behavior QA had originally flagged and left
+unfixed:
+  - participant_count == 0, including with min_participation == 0 ("no
+    floor") -- now returns gracefully instead of raising ZeroDivisionError.
+  - agree_count > participant_count, participant_count > basket_size, and
+    negative counts -- now raise ValueError instead of being silently
+    accepted as a legitimate (if malformed) basket.
 """
 import sys
 import os
@@ -84,49 +85,49 @@ def test_participant_count_zero_with_default_limits_is_safe():
     check(agreement == 0.0, "agreement should default to 0.0 on floor rejection")
 
 
-def test_BUG_zero_division_when_min_participation_is_zero():
+def test_zero_participants_is_safe_even_with_no_floor():
     """
-    KNOWN BUG (QA-flagged, not fixed by QA per role rules):
-    consensus_gate has no explicit `participant_count == 0` guard independent
-    of the floor comparison. If a caller configures RiskLimits(min_participation=0)
-    -- a plausible way to express "no participation floor" -- then the natural
-    edge input participant_count=0 skips the floor check (0 < 0 is False) and
-    falls through to `agree_count / participant_count`, raising ZeroDivisionError
-    instead of returning a graceful (False, 0.0, reason) tuple.
-
-    This test documents/reproduces the crash. It is expected to keep raising
-    ZeroDivisionError until src/risk_execution.py adds an explicit
-    `participant_count == 0` guard ahead of (or independent from) the floor
-    comparison. Do not "fix" this test to hide the bug -- fix the application
-    code in src/risk_execution.py::consensus_gate instead.
+    Fixed (was: KNOWN BUG). consensus_gate now has an explicit
+    `participant_count == 0` guard independent of the floor comparison, so a
+    caller configuring RiskLimits(min_participation=0) -- "no participation
+    floor" -- no longer hits participant_count=0 falling through the floor
+    check (0 < 0 is False) into `agree_count / participant_count` and raising
+    ZeroDivisionError. It now returns a graceful (False, 0.0, reason) tuple.
     """
     L = RiskLimits(min_participation=0)
-    try:
-        consensus_gate(0, 0, 10, L)
-    except ZeroDivisionError:
-        return  # bug reproduced as expected
-    raise AssertionError(
-        "expected ZeroDivisionError to be reproduced with min_participation=0, "
-        "participant_count=0 -- if this no longer raises, the underlying bug "
-        "in consensus_gate has been fixed; update this test's expectation "
-        "accordingly rather than deleting the coverage.")
+    ok, agreement, reason = consensus_gate(0, 0, 10, L)
+    check(ok is False, f"0 participants must still be rejected even with no floor, got {ok!r}")
+    check(agreement == 0.0, f"agreement should be 0.0, got {agreement}")
+    check("participant" in reason, f"reason should mention participants, got {reason!r}")
 
 
-def test_no_upper_bound_validation_on_agree_count_or_participant_count():
+def test_inconsistent_counts_raise_value_error():
     """
-    Documents (does not "fix") that consensus_gate performs no sanity check
-    that agree_count <= participant_count <= basket_size. Nonsensical inputs
-    are silently accepted and can even produce agreement > 100%.
+    Fixed (was: documented-not-fixed). consensus_gate now validates that
+    agree_count <= participant_count <= basket_size and that no count is
+    negative -- these shapes can only come from an upstream counting bug, so
+    they now raise ValueError instead of being silently gated as if they were
+    a legitimate (if malformed) basket.
     """
     L = RiskLimits()
-    # agree_count > participant_count -> agreement > 1.0, still "passes"
-    ok, agreement, reason = consensus_gate(5, 3, 10, L)
-    check(ok is True, "current (buggy-input-tolerant) behavior: passes despite agree>participants")
-    check(agreement > 1.0, f"expected agreement > 1.0 for malformed input, got {agreement}")
 
-    # participant_count > basket_size -> no validation, silently allowed
-    ok, agreement, reason = consensus_gate(12, 15, 10, L)
-    check(ok is True, "current behavior: participant_count > basket_size is not validated")
+    try:
+        consensus_gate(5, 3, 10, L)  # agree_count > participant_count
+        raise AssertionError("expected ValueError for agree_count > participant_count")
+    except ValueError:
+        pass
+
+    try:
+        consensus_gate(12, 15, 10, L)  # participant_count > basket_size
+        raise AssertionError("expected ValueError for participant_count > basket_size")
+    except ValueError:
+        pass
+
+    try:
+        consensus_gate(-1, 3, 10, L)  # negative count
+        raise AssertionError("expected ValueError for negative agree_count")
+    except ValueError:
+        pass
 
 
 if __name__ == "__main__":
@@ -135,8 +136,8 @@ if __name__ == "__main__":
         test_floor_boundary_is_inclusive,
         test_consensus_boundary_is_inclusive,
         test_participant_count_zero_with_default_limits_is_safe,
-        test_BUG_zero_division_when_min_participation_is_zero,
-        test_no_upper_bound_validation_on_agree_count_or_participant_count,
+        test_zero_participants_is_safe_even_with_no_floor,
+        test_inconsistent_counts_raise_value_error,
     ]
     failures = 0
     for t in tests:

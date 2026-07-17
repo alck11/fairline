@@ -182,15 +182,23 @@ correctly evaluated on participants (3/3 = 1.0). Both the floor boundary
 (`agreement == basket_consensus`) are inclusive and tested. `_check`,
 `execute_arb`, kill switch, and all other risk-gate logic verified untouched.
 
-**Follow-up (QA-flagged, not fixed — minor, doesn't trigger under any default
-config):** `consensus_gate(0, 0, ..., RiskLimits(min_participation=0))` raises
-`ZeroDivisionError` instead of failing gracefully, since `min_participation=0`
-("no floor") makes the floor check `0 < 0 → False` and falls through to the
-division. Also, `agree_count > participant_count` or `participant_count >
-basket_size` (nonsensical inputs) are silently accepted rather than validated —
-could mask an upstream counting bug in whatever eventually supplies these
-counts. Both documented as intentionally-reproducing regression tests in
-`tests/test_risk_execution_consensus.py` rather than silently fixed.
+**Follow-up resolved (2026-07-17):** `consensus_gate` now guards
+`participant_count == 0` independently of the floor comparison, so
+`RiskLimits(min_participation=0)` ("no floor") with zero participants returns
+`(False, 0.0, "no participants (0/N)")` instead of raising
+`ZeroDivisionError`. It also validates `agree_count <= participant_count <=
+basket_size` and rejects negative counts, raising `ValueError` on any of
+those — nonsensical shapes that can only come from an upstream counting bug,
+so they're no longer silently gated as if they were a legitimate (if
+malformed) basket. The two regression tests in
+`tests/test_risk_execution_consensus.py` that documented the old
+bug/no-validation behavior (`test_BUG_zero_division_when_min_participation_is_zero`,
+`test_no_upper_bound_validation_on_agree_count_or_participant_count`) were
+rewritten to assert the fixed behavior
+(`test_zero_participants_is_safe_even_with_no_floor`,
+`test_inconsistent_counts_raise_value_error`). No caller in the repo passes
+malformed counts today (`execute_copy`'s only caller is the demo, with
+well-formed inputs), so this is non-breaking.
 
 ---
 
