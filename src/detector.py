@@ -93,21 +93,35 @@ def cross_venue_edge(size: float, *,
 
 
 def complete_set_edge(size: float, *, venue: str, category: str,
-                      prices: Sequence[float]) -> Opportunity:
+                      prices: Sequence[float],
+                      maker: bool | Sequence[bool] = False) -> Opportunity:
     """Buy one share of every outcome of a market, all on the SAME venue
     (sum of asks < $1). Exactly one outcome pays $1, so the venue itself
     guarantees settlement. Binary markets are just the size-2 case:
     `prices=[yes_price, no_price]` — there is no separate shape for
-    binary vs. N-outcome, only the number of legs differs."""
-    legs = [Leg(venue, size, p, category) for p in prices]
+    binary vs. N-outcome, only the number of legs differs.
+
+    `maker` is a single bool (applied to every leg) or one bool per leg
+    (resting limit orders on Polymarket are fee-free and rebate-earning;
+    see fees.py) — a within-venue complete set can mix resting and taker
+    legs same as the old bundle_edge could."""
+    if not prices:
+        raise ValueError("complete_set_edge requires at least one price")
+    makers = [maker] * len(prices) if isinstance(maker, bool) else list(maker)
+    if len(makers) != len(prices):
+        raise ValueError(
+            f"maker has {len(makers)} entries but prices has {len(prices)}")
+    legs = [Leg(venue, size, p, category, maker=m)
+            for p, m in zip(prices, makers)]
     deployed, fees, net = _profit_for_legs(legs, size)
     return Opportunity(
         kind="complete_set", size=size,
         gross_edge=1.0 - sum(prices),
         total_fees=fees, net_profit=net,
         roi=(net / deployed) if deployed else 0.0,
-        legs=[{"venue": venue, "side": f"out{i}", "price": p, "size": size}
-              for i, p in enumerate(prices)],
+        legs=[{"venue": venue, "side": f"out{i}", "price": p, "size": size,
+               "maker": m}
+              for i, (p, m) in enumerate(zip(prices, makers))],
     )
 
 
@@ -147,6 +161,27 @@ if __name__ == "__main__":
                            prices=[0.42, 0.53])
     print(f"complete_set: kind={cs.kind!r}  roi={cs.roi:6.2%}  net=${cs.net_profit:6.2f}")
     assert cs.kind == "complete_set"
+
+    # resting (maker) legs pay zero Polymarket fee -> strictly more net profit
+    # for the same prices than the all-taker fill above.
+    cs_maker = complete_set_edge(100, venue="polymarket", category="politics",
+                                 prices=[0.42, 0.53], maker=True)
+    assert cs_maker.total_fees == 0.0
+    assert cs_maker.net_profit > cs.net_profit
+    print(f"complete_set (maker): fees=${cs_maker.total_fees:.2f}  "
+          f"net=${cs_maker.net_profit:6.2f}")
+
+    # per-leg maker flags: only the resting leg is fee-free.
+    cs_mixed = complete_set_edge(100, venue="polymarket", category="politics",
+                                 prices=[0.42, 0.53], maker=[True, False])
+    assert cs.total_fees > cs_mixed.total_fees > cs_maker.total_fees
+
+    # empty legs must error, not silently report a fake full-notional profit.
+    try:
+        complete_set_edge(100, venue="polymarket", category="politics", prices=[])
+        raise AssertionError("expected ValueError for empty prices")
+    except ValueError:
+        pass
 
     # top-of-book looks great (5% gross) ...
     flat = cross_venue_edge(100, yes_venue="polymarket", yes_price=0.42, yes_cat="politics",

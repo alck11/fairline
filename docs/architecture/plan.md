@@ -29,16 +29,19 @@ a cross-venue one with the exact two allowed `kind` strings; no `"bundle"`/
 `"multi"` references remain in code; downstream consumers (`ev_detector.py`,
 `risk_execution.py`) don't read `Opportunity.kind` so nothing broke there.
 
-**Follow-up (QA-flagged, needs an architect ruling):** the merged
-`complete_set_edge` signature dropped the `yes_maker`/`no_maker` params the old
-`bundle_edge` had — a within-venue complete set can no longer be priced with
-resting (fee-free, rebate-earning) maker legs, only taker. Nothing in the repo
-currently calls it with `maker=True`, so nothing is broken today, but decide
-whether `complete_set_edge` should regain per-leg `maker` flags before this is
-used for real. Separately, `complete_set_edge(prices=[])` silently returns a
-fake full-notional "profit" instead of erroring — pre-existing (inherited
-unchanged from the old code), not introduced by this merge, but worth an empty-
-legs guard whenever this function is next touched.
+**Follow-up resolved (2026-07-17):** `complete_set_edge` regained per-leg maker
+flags — `maker: bool | Sequence[bool] = False`, broadcast to every leg when a
+single bool, or matched 1:1 against `prices` when a sequence (mismatched
+lengths raise `ValueError`). A within-venue complete set can now mix resting
+(fee-free, rebate-earning) and taker legs same as the old `bundle_edge` could.
+Also added the empty-legs guard: `complete_set_edge(prices=[])` now raises
+`ValueError` instead of silently returning a fake full-notional "profit".
+Demo in `src/detector.py`'s `__main__` extended to assert: an all-maker fill
+has zero fees and strictly higher net profit than the all-taker fill at the
+same prices; a mixed `[True, False]` fill's fees land strictly between the
+all-taker and all-maker cases; empty `prices` raises. No other caller exists
+in the repo (only the demo calls `complete_set_edge`), so the added keyword
+arg is non-breaking.
 
 ---
 
