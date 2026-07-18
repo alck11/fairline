@@ -3,7 +3,9 @@ numpy>=1.24
 xgboost>=2.0
 scikit-learn>=1.3
 scipy>=1.10
+psycopg[binary]>=3.1   # src/store.py -- Postgres/TimescaleDB persistence (WP-1)
 # integration (not needed to run the demos / tests):
 # py-clob-client      # Polymarket CLOB
-# psycopg[binary]     # Postgres/TimescaleDB
 # redis               # hot best-bid/ask state
+# test-only, optional: `pip install pgserver` gives tests/test_store_persistence.py
+# a throwaway local Postgres when $DATABASE_URL isn't set (see README).

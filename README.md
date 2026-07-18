@@ -25,6 +25,8 @@ Domain language lives in [CONTEXT.md](CONTEXT.md); decisions in
 | File | Block | What it does |
 |------|-------|--------------|
 | `schema/001_schema.sql` | Storage | TimescaleDB schema: markets, outcomes, cross-venue links, orderbook + trade hypertables, wallet trades, point-in-time wallet scores, opportunity + execution audit. |
+| `schema/002_kalshi_ev.sql` | Storage | Additive migration (WP-1, ADR-0010): candlestick (hypertable), weather_forecast, weather_observation, directional_signal, backtest_run, backtest_result, plus the `outcome_token` bridge `store.py` needs to address outcomes by venue-native token/ticker id. Does not touch `001` or any parked table. |
+| `src/store.py` | Storage (persistence layer) | Thin layer over `001`+`002`: connection from env, idempotent upserts, and the point-in-time (`< as_of`, enforced in SQL) read helpers `prob_fn` implementations consume (ADR-0009, WP-1). No business logic, no network calls. |
 | `src/ingest.py` | Ingestion (interface) | `MarketSource` Protocol — how markets, orderbooks, price history, wallet trades and leaderboard discovery enter the stack. Backend-agnostic (ADR-0006). |
 | `src/ingest_polymarket_cli.py` | Ingestion (backend) · PARKED | First `MarketSource` impl: shells out to the official [polymarket-cli](https://github.com/Polymarket/polymarket-cli) (`-o json`, no-auth public data). Install the Rust binary and put `polymarket` on PATH (or set `$POLYMARKET_CLI`). |
 | `src/ev_detector.py` | Directional (MVP-primary) | Model-vs-price EV betting: post-fee EV/share, depth-aware sizing, quarter-Kelly cap. Probability supplied via the `prob_fn(market, as_of)` contract (ADR-0009). Paper-first (ADR-0001, ADR-0005). |
@@ -42,6 +44,49 @@ python3.12 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python src/<file>.py
 ```
+
+## Database setup
+
+`src/store.py` (WP-1) needs **PostgreSQL 15+ with the TimescaleDB extension**.
+Everything else in the repo (the detectors, scoring, risk engine) runs with no
+database at all — only `store.py` and anything built on it need this.
+
+1. Install Postgres + TimescaleDB. Options:
+   - Docker (fastest for local dev): `docker run -d --name fairline-pg -p 5432:5432 \
+     -e POSTGRES_PASSWORD=postgres timescale/timescaledb:latest-pg16`
+   - Native: follow the [TimescaleDB install docs](https://docs.timescale.com/self-hosted/latest/install/)
+     for your OS/Postgres version, then `CREATE EXTENSION timescaledb;` is
+     handled by the schema itself (below) — you only need the extension
+     files present on the server.
+2. Create a database and point `$DATABASE_URL` at it (`store.connect()` and
+   `psql` both read this; if unset, both fall back to the standard libpq env
+   vars `$PGHOST`/`$PGPORT`/`$PGDATABASE`/`$PGUSER`/`$PGPASSWORD`):
+   ```
+   export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/fairline
+   psql "$DATABASE_URL" -c 'CREATE DATABASE fairline' 2>/dev/null || true
+   ```
+3. Apply the schema, **in order** — `001` first (base dimension tables:
+   market/outcome/orderbook/wallet/arb — shared with the parked subsystems),
+   then `002` (the five Kalshi/weather/backtest tables from ADR-0010, plus
+   the small `outcome_token` bridge `store.py` needs — see the comment at
+   the top of `schema/002_kalshi_ev.sql`):
+   ```
+   psql "$DATABASE_URL" -f schema/001_schema.sql
+   psql "$DATABASE_URL" -f schema/002_kalshi_ev.sql
+   ```
+4. `.venv/bin/pip install -r requirements.txt` (pulls in `psycopg[binary]`),
+   then `.venv/bin/python src/store.py` runs a small demo against it.
+
+**Running `tests/test_store_persistence.py` without provisioning anything:**
+if `$DATABASE_URL` is unset, the test falls back to `pgserver`
+(`.venv/bin/pip install pgserver`, test-only, not in `requirements.txt`) to
+spin up a throwaway local Postgres for the duration of the run — no manual
+setup needed, at the cost of running without the TimescaleDB extension (the
+test detects this and skips the extension/hypertable statements; every
+correctness check it makes — round-trip, idempotency, PIT boundaries — is
+plain SQL and unaffected by whether the tables are hypertables). If neither
+`$DATABASE_URL` nor `pgserver` is available, the test prints why and exits 0
+(skipped, not failed) rather than pretending to pass.
 
 ## Suggested build order (MVP — see [plan.md](docs/architecture/plan.md))
 
