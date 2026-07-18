@@ -1,12 +1,15 @@
 # Fairline
 
 A research stack for finding fee-aware, risk-gated edge in prediction markets.
-Two co-equal, independent strategies — structural/cross-venue **arbitrage** and
-**copy-trading** of scored wallets — share one storage layer, one market
-matcher, and one risk/execution engine, plus one **experimental** third
-strategy (**directional** EV betting) that must earn co-equal status on paper.
-Everything runs on paper until an edge is proven; live order placement is
-stubbed and gated.
+The **active MVP** is a single strategy: **directional** EV betting on Kalshi's
+exclusive weather/economics markets — back one side when your own probability
+model disagrees with the price — backtested on free Kalshi history and run
+**paper-first** (ADR-0001). Two earlier strategies, structural/cross-venue
+**arbitrage** and **copy-trading** of scored wallets, are **parked** (kept in
+repo, demo-green, out of the MVP — see the pivot in `docs/product/requirements.md`
+and `docs/research/2026-07-17-polymarket-edge-landscape.md`). Everything runs on
+paper until an edge is proven; live order placement is stubbed and gated, with
+IBKR the intended eventual live path (ADR-0008).
 
 ## Language
 
@@ -179,19 +182,25 @@ The number of basket members who traded a given market within the signal
 window. The denominator of consensus; below the floor, no copy signal exists.
 _Avoid_: turnout, activity.
 
-### Directional (experimental)
+### Directional (MVP-primary strategy)
 
 **Directional**:
 Backing **one side** of a market because your own model's probability disagrees
 with the price. Not riskless (unlike arbitrage) and not derived from wallets
-(unlike copy-trading) — a third, experimental strategy that is paper-only and
-only as good as the injected model.
-_Avoid_: EV strategy (EV is the number), speculation, punting.
+(unlike copy-trading). Since the 2026-07-17 pivot it is the **MVP's primary
+strategy** (ADR-0005), targeting Kalshi's longer-horizon weather/econ markets;
+still paper-first and only as good as its probability model.
+_Avoid_: EV strategy (EV is the number), speculation, punting, experimental
+(retired — it is the lead strategy now, not a co-equal-in-waiting).
 
 **Model probability**:
-The injected model's probability that an outcome pays $1 — always written
-`p_model` to keep it visually distinct from `price` (the market's implied
-probability). The model itself lives outside fairline and is injected.
+The model's probability that an outcome pays $1 — always written `p_model` to
+keep it visually distinct from `price` (the market's implied probability). The
+model is supplied through the `prob_fn(market, as_of)` injection **contract**
+(ADR-0009), point-in-time by construction. The contract is external even when the
+implementation is built in-repo: the MVP's weather `prob_fn` is authored here but
+still consumed only through that contract, so callers never depend on a specific
+model.
 _Avoid_: p (alone, ambiguous with price), estimate, forecast (that is the
 wallet model's output).
 

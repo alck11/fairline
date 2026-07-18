@@ -1,3 +1,9 @@
+> **Status: PARKED, not active (2026-07-17).** This governs the copy-trade/matcher
+> subsystem, which is parked out of the Kalshi directional-EV MVP (see
+> [`requirements.md`](../../product/requirements.md) → *Parked*). Kept in-repo and
+> demo-green; **not enforced against the current plan.** Revive with the copy-trade
+> stack only under the requirements doc's revival conditions.
+
 # Embeddings only triage; only the LLM or a human writes a market link
 
 The cross-venue matcher uses local embeddings (Ollama) **only to triage** a

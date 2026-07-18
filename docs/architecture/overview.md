@@ -1,153 +1,232 @@
-# Architecture Overview (stub)
+# Architecture Overview — directional-EV on Kalshi (backtested, paper-first)
 
-> **Status: stub.** Derived from reading the existing code, schema,
-> [`CONTEXT.md`](../../CONTEXT.md), and [ADRs](./decisions/) — not a full architect
-> pass. It reflects the system *as it stands* plus the glossary/ADR decisions.
-> The dev-team architect should own and expand this (esp. WP-3's open question
-> and any live-mode design) rather than treat it as settled.
+> Owned by the dev-team architect. Rewritten 2026-07-17 for the confirmed Kalshi
+> pivot (supersedes the stub). Primary inputs: [`requirements.md`](../product/requirements.md),
+> [`roadmap.md`](../product/roadmap.md), the
+> [venue research](../research/2026-07-17-polymarket-edge-landscape.md) Parts 6–7,
+> [`CONTEXT.md`](../../CONTEXT.md), and the ADRs. Describes the system being built
+> now; the parked copy-trade/arb subsystems are documented as *parked, in-repo*.
 
-## What fairline is
+## What fairline is (now)
 
-A research stack for finding fee-aware, risk-gated edge in prediction markets via
-two **co-equal, independent** strategies that share one spine:
+A research stack whose **single job** is to answer one question on real evidence:
+*can a probability model beat Kalshi's weather/economics prices after fees,
+out-of-sample, on paper?* It does this by ingesting free Kalshi historical data,
+replaying it through a fee-aware, Kelly-capped, risk-gated **directional-EV**
+strategy, and emitting a GO/KILL report against an always-market-price baseline.
 
-- **Arbitrage** — buy a complete set of outcomes for < $1 (within-venue, or
-  cross-venue via a verified link).
-- **Copy-trade** — score wallets point-in-time, copy baskets of specialists on
-  consensus.
+- **Active (MVP):** directional EV on Kalshi weather/econ (ADR-0005, promoted to
+  primary). Data via Kalshi's public REST/WS API (no trading auth). Execution is
+  paper-only (ADR-0001).
+- **Parked (in-repo, demo-green, not MVP):** cross-venue/complete-set **arbitrage**
+  (`detector.py`) and **copy-trade** wallet scoring (`wallet_features.py`,
+  `wallet_scoring.py`, `market_matcher.py`). Their ADRs (0002/0003/0004/0007) are
+  flagged *parked, not active* and are not enforced against this plan.
+- **Post-MVP:** live execution via **IBKR** (ADR-0008), gated behind a passing
+  backtest *and* forward paper (ADR-0001). No IBKR/live code ships in the MVP.
 
-Plus one **experimental** third strategy (ADR-0005): **directional EV** — back
-one side when an injected probability model disagrees with the price. Paper-only
-until it earns co-equal status.
-
-Everything runs on paper until an edge is proven; live placement is stubbed and
-gated (ADR-0001).
-
-## Components & data flow
+## System context and data flow
 
 ```mermaid
 flowchart TD
-    subgraph Ingestion["Ingestion"]
-        SRC[ingest.py\nMarketSource Protocol]
-        CLI[ingest_polymarket_cli.py\npolymarket-cli backend]
-        CLI -->|implements| SRC
-        ING[venue APIs\nKalshi: future KalshiSource]
+    subgraph Sources["Data sources (free, no trading auth)"]
+        KAPI[Kalshi public REST/WS/FIX\nmarkets, candles, trades, resolutions]
+        NOAA[NOAA/NWS bulk\nforecast + observation history]
     end
 
-    subgraph Storage["Storage"]
-        PG[(TimescaleDB\ncold: books, trades, scores)]
-        RD[(Redis\nhot: best bid/ask)]
+    subgraph Ingest["Ingestion (ADR-0006)"]
+        KS[KalshiSource\nMarketDataSource impl]
+        WX[weather_ingest\nNOAA/NWS loader]
     end
+    KAPI --> KS
+    NOAA --> WX
 
-    SRC --> PG
-    SRC --> RD
-    ING --> SRC
-
-    subgraph Shared["Shared spine"]
-        FEES[fees.py\nsingle source of truth]
-        MATCH[market_matcher.py\ntriage → escalate]
-        ENG[risk_execution.py\nEngine + risk gates]
+    subgraph Store["Storage — PostgreSQL + TimescaleDB (ADR-0010)"]
+        PG[(market, outcome,\ncandlestick*, trade_print*,\nweather_forecast*, weather_observation*,\ndirectional_signal, backtest_run, backtest_result)]
     end
+    KS --> PG
+    WX --> PG
 
-    subgraph Arb["Arbitrage strategy"]
-        DET[detector.py\ncomplete_set / cross_venue]
+    subgraph Model["prob_fn contract (ADR-0009)"]
+        PF[ProbFn: (market, as_of) -> p_model in 0..1\nplaceholder = midprice/climatology\nv1 = weather model, GATED on calibration GO]
     end
+    PG --> PF
 
-    subgraph Copy["Copy-trade strategy"]
-        FEAT[wallet_features.py\nPIT features + score]
-        SCORE[wallet_scoring.py\nforecast + baskets]
+    subgraph Backtest["EV backtest harness (US-5)"]
+        H[replay loop over as_of steps]
+        EV[ev_detector.find_signal\nEV/share + quarter-Kelly]
+        ENG[risk_execution.Engine\npaper mode, all risk gates]
     end
-
-    subgraph Dir["Directional strategy (experimental)"]
-        EV[ev_detector.py\nEV + Kelly; prob_fn injected]
-    end
-
-    RD --> DET
-    PG --> DET
-    FEES --> DET
-    MATCH -->|verified links| DET
-    DET -->|Opportunity| ENG
-
-    PG --> FEAT
-    FEAT --> SCORE
-    SCORE -->|basket + consensus| ENG
-
-    RD --> EV
-    FEES --> EV
+    PG --> H
+    PF --> H
+    H --> EV
     EV -->|DirectionalSignal| ENG
+    ENG -->|paper fills, PnL| PG
 
-    ENG -->|paper/live| PG
+    subgraph Verdict["Report + audit (US-6, US-7)"]
+        RPT[report: net ROI vs baseline,\nBrier, Sharpe, drawdown]
+        AUD[leakage / point-in-time audit\nfails loud on lookahead]
+    end
+    PG --> RPT
+    PG --> AUD
+
+    subgraph Calib["Track B gate (US-4)"]
+        CAL[calibration study\ndo Kalshi prices track forecasts?\nGO / NO-GO]
+    end
+    PG --> CAL
+    CAL -.GO.-> PF
+
+    subgraph Parked["Parked (in-repo, not MVP)"]
+        ARB[detector.py arb]
+        COPY[wallet_* + market_matcher]
+    end
+
+    subgraph Future["Post-MVP (ADR-0008, gated)"]
+        IBKR[IBKR execution adapter\nplace_live inside risk gates]
+    end
+    ENG -.post-MVP, gated.-> IBKR
 ```
+`*` = TimescaleDB hypertable.
 
-**Responsibilities**
-- `ingest.py` — the `MarketSource` Protocol: markets, orderbooks, price
-  history, wallet trades, leaderboard discovery. Row types shaped for the
-  schema tables (ADR-0006).
-- `ingest_polymarket_cli.py` — first `MarketSource` backend: subprocess over
-  the official `polymarket -o json` CLI, no-auth public data only.
-- `fees.py` — venue fee math; imported by everything that prices a leg. Single
-  source of truth (Polymarket V2 taker `rate·p·(1−p)`, Kalshi per-order rounded).
-- `detector.py` — fee-aware edge for `complete_set` / `cross_venue`; depth-aware
-  sizing that walks the book to the profit-*maximizing* size after slippage.
-- `market_matcher.py` — cross-venue outcome equivalence. Embeddings **triage**;
-  the LLM (or a human) **writes** the link (ADR-0002).
-- `wallet_features.py` — point-in-time, leakage-safe features + the transparent
-  0–100 composite **score** (ADR-0003).
-- `wallet_scoring.py` — forward-labelled XGBoost **forecast** + category baskets;
-  adopted only if it beats the composite baseline out-of-time.
-- `ev_detector.py` — **experimental** directional strategy (ADR-0005): post-fee
-  EV per share, depth-aware sizing, fractional-Kelly cap; probability model
-  injected via `prob_fn`, never built here.
-- `risk_execution.py` — the one `Engine`: risk gates, paper fills, atomic
-  all-legs-or-none arbs, basket-consensus copies, latching kill switch (live).
-
-## Stack
+## Chosen stack (one line each)
 
 | Choice | Why |
 |--------|-----|
-| PostgreSQL + TimescaleDB | hypertables for replayable cold time-series (books, trades, scores) |
-| Redis | hot best-bid/ask state kept out of the write path |
-| pandas / numpy / scipy | point-in-time feature engineering + rank stats |
-| XGBoost | the forecast model; earns its place only vs. the composite baseline |
-| Ollama (local) + Claude API | local/remote split for matching — cheap triage local, hard judgments remote |
-| polymarket-cli (Rust binary) | first MarketSource backend — official, no-auth public data, absorbs API churn (ADR-0006) |
-| py-clob-client / Kalshi REST | live placement (intentionally unimplemented) |
+| PostgreSQL 15 + TimescaleDB | Replayable cold time-series (candles, trades, forecasts) in hypertables; already the committed store and schema base. |
+| Kalshi public REST/WS API | The only US-legal venue with **free historical trades + candlesticks** since 2021 — the one thing that makes the edge backtestable (research Part 6). |
+| Python 3.10+, pandas/numpy/scipy | Point-in-time replay, calibration stats, and report metrics; matches the existing repo. |
+| `fees.py` Kalshi coefficient (built) | Kalshi fee is the same `coef·contracts·p·(1−p)` shape already modelled; single source of truth. |
+| `ev_detector.py` + `risk_execution.py` (built) | EV/Kelly math and the paper Engine with risk gates already exist and are Kalshi-ready. |
+| NOAA/NWS bulk data | Free, authoritative forecast+observation history — the weather model's only inputs (Track B). |
+| IBKR (post-MVP execution) | User's choice; one account routes Kalshi+ForecastEx+CME. Data stays free/direct from Kalshi (ADR-0008). |
+| XGBoost, Ollama, polymarket-cli | **Parked** — used only by the copy-trade/matcher subsystems; not on the MVP path. |
 
 ## Data model
 
-Full DDL: [`schema/001_schema.sql`](../../schema/001_schema.sql). Grain and
-relationships (see CONTEXT.md for canonical definitions):
+Canonical grain in [`CONTEXT.md`](../../CONTEXT.md); DDL in `schema/001_schema.sql`
+(base) + `schema/002_kalshi_ev.sql` (this pivot, ADR-0010).
 
-- **venue** (`polymarket`|`kalshi`) → **market** (one event, one venue) →
-  **outcome** (one row per tradable leg; prices/books/links attach here).
-- **market_link** — pairwise outcome equivalence with `polarity` + `confidence`
-  (ADR-0004: a link, not a canonical event entity).
-- **orderbook_snapshot**, **trade_print** — hypertables (cold time-series).
-- **wallet** → **wallet_trade** (resolved positions) → **wallet_score**
-  (point-in-time hypertable).
-- **arb_opportunity** → **execution** (detection + execution audit trail).
+**Reused as-is (base schema):**
+- **venue** (`polymarket`|`kalshi`) → **market** (one event, one venue;
+  `external_id` = Kalshi ticker, `category` ∈ {weather, economics, …}, `fee_rate`,
+  `resolves_at`, `resolved`) → **outcome** (one row per tradable leg; YES/NO for
+  Kalshi binaries; `resolved_value` ∈ {1.0, 0.0} once settled).
+- **trade_print** (hypertable) — Kalshi trade prints.
 
-## Interface contracts (as-built)
+**New (ADR-0010, `schema/002_kalshi_ev.sql`):**
+- **candlestick** (hypertable) — `(ts, outcome_id, open, high, low, close, volume)`,
+  price in [0,1]; Kalshi's free historical price history and the harness's primary
+  point-in-time price source.
+- **weather_forecast** — `(issued_at, valid_at, station, variable, value, source,
+  horizon_h)`; PIT key is `issued_at` (what was knowable when). Track B input.
+- **weather_observation** — `(observed_at, station, variable, value, source)`; the
+  realized outcome the calibration study and any model training scores against.
+- **directional_signal** — persists each `DirectionalSignal` at decision time
+  (`as_of`, `outcome_id`, `p_model`, `price`, `size`, `ev_per_share`, `run_id`);
+  the audit trail ADR-0005 flagged as deliberate follow-up.
+- **backtest_run** — `(run_id, prob_fn_name, window_start, window_end, params,
+  git_sha, created_at)`; one row per backtest, makes the report reproducible.
+- **backtest_result** — per-signal realized PnL at resolution
+  `(run_id, outcome_id, entry_as_of, entry_price, resolved_value, fee_paid,
+  realized_pnl)`; the report and the always-market-price baseline read only this.
 
-- `Leg(venue, size, price, category, ...).fee()` — the pricing primitive.
-- `detector` edge fns return an `Opportunity(kind, size, gross_edge, total_fees,
-  net_profit, roi, legs)`; `net_edge` is a derived property (per $1 payout).
-- `Engine.execute_arb(opp)` — atomic all-legs-or-none; partial → `aborted` +
-  unwind. `Engine.execute_copy(wallet, leg, basket_agreement)` — consensus-gated.
-- `match(q_a, rules_a, q_b, rules_b, *, embedder, confirmer) -> MatchResult|None`
-  — injectable models for testing.
+**Parked (base schema, untouched):** `market_link`, `wallet`, `wallet_trade`,
+`wallet_score`, `arb_opportunity`, `execution` — kept for the parked subsystems.
 
-## Cross-cutting policy (current state — thin, needs the architect)
+## Interface contracts (concrete, so the executor invents nothing)
 
-- **Error handling:** unimplemented live/integration paths raise
-  `NotImplementedError` on purpose (fail loud, never silently no-op).
-- **Config:** risk limits are a `RiskLimits` dataclass; venue fee coefficients
-  are module constants in `fees.py`.
-- **Testing:** each module is importable and self-demos via `__main__` on
-  synthetic data; matcher routing is tested with injected fakes. A `tests/`
-  directory now exists (`tests/test_risk_execution_consensus.py`, added during
-  WP-4 QA) — standalone, no pytest dependency, matching the repo's
-  `python3 <file>.py` convention. **Gap:** only one module has dedicated
-  regression tests so far; extending this harness to the rest of the WPs is
-  still a candidate v0.2 item.
-- **Logging / observability:** not yet designed.
+### Ingestion — `MarketDataSource` (ADR-0006)
+The harness depends on a narrower interface than the full `MarketSource` Protocol.
+Split the venue-neutral data methods from the Polymarket-only wallet methods:
+
+```python
+# src/ingest.py — add alongside the existing MarketSource Protocol
+class MarketDataSource(Protocol):
+    def list_markets(self, *, active: bool = True, category: str | None = None,
+                     limit: int = 50) -> list[MarketRow]: ...
+    def orderbook(self, token_id: str) -> BookSnapshot: ...
+    def candlesticks(self, token_id: str, *, start: datetime, end: datetime,
+                     period: str = "1h") -> list[Candle]: ...     # NEW row type
+    def resolutions(self, external_ids: Sequence[str]) -> list[ResolutionRow]: ...  # NEW
+```
+`KalshiSource` (`src/ingest_kalshi.py`) implements `MarketDataSource`. It does
+**not** implement `wallet_trades`/`leaderboard`; calling them raises
+`NotImplementedError("Kalshi exposes no public per-trader feed")` — this is the
+data/execution and data/wallet split ADR-0006 records. `Candle` and
+`ResolutionRow` are new frozen dataclasses in `ingest.py` shaped for the
+`candlestick` and `market`/`outcome` tables respectively.
+
+### Model — `prob_fn` (ADR-0009)
+```python
+# src/prob_fn.py
+@dataclass(frozen=True)
+class MarketRef:                     # what a model MAY read; nothing time-forward
+    external_id: str; venue: str; category: str
+    outcome_token_id: str; outcome_label: str
+    resolves_at: datetime | None
+    params: dict                     # strike/threshold, station, target date, ...
+
+class ProbFn(Protocol):
+    name: str
+    def __call__(self, market: MarketRef, as_of: datetime) -> float: ...  # p in [0,1]
+```
+**Point-in-time guarantee (binding):** a `ProbFn` may read only data timestamped
+strictly before `as_of` (candlesticks with `ts < as_of`, forecasts with
+`issued_at < as_of`, observations with `observed_at < as_of`). Placeholder
+`MidpriceProbFn` returns the last candlestick close before `as_of` — this *is* the
+US-6 always-market-price baseline (zero gross edge, pays only fees). The weather
+`prob_fn` v1 (WP-8) implements the same Protocol and drops into the harness with
+no harness change.
+
+### Backtest harness (US-5)
+```python
+# src/backtest.py
+def run_backtest(source_or_store, prob_fn: ProbFn, *, category: str,
+                 start: datetime, end: datetime, step: timedelta,
+                 limits: RiskLimits, run_id: str) -> BacktestSummary: ...
+```
+Per `as_of` step it: loads each candidate outcome's price as of `as_of` (last
+candle `ts < as_of`); calls `p = prob_fn(market_ref, as_of)`; computes EV/share
+via `ev_detector.find_signal` (binding `prob_fn=lambda _tok: p`, so `ev_detector`
+stays byte-compatible — see ADR-0009); executes the resulting `DirectionalSignal`
+through `Engine.execute_signal(...)` (paper) under all risk gates; on the outcome's
+resolution calls `Engine.settle(realized_pnl)` and writes a `backtest_result` row.
+
+### Execution (built, reused)
+`ev_detector.find_signal(...) -> DirectionalSignal | None` and
+`fees.Leg(venue, size, price, category, ...).fee()` are unchanged. The harness
+needs one small additive method on the built Engine:
+`Engine.execute_signal(signal, *, category) -> dict` — routes a `DirectionalSignal`
+through `_check` + `_fill` like `execute_copy` does, records to the blotter, and
+never touches `arb_opportunity` (CONTEXT.md → Signal). This is the only change to
+`risk_execution.py`; the parked arb/copy paths and the kill switch are untouched.
+
+## Cross-cutting policy
+
+- **Error handling:** fail loud, never silently no-op. Ingestion degrades on
+  API/rate-limit failure with a clear message and **non-zero exit** (US-2). The
+  leakage audit (US-7) exits non-zero on any lookahead. `place_live` keeps raising
+  (ADR-0001). Bad `prob_fn` output (p ∉ [0,1]) raises, as `ev_detector` already does.
+- **Configuration:** risk limits stay in the `RiskLimits` dataclass; fee
+  coefficients stay module constants in `fees.py`; DB connection and Kalshi API
+  base/rate-limit from environment variables (documented in README); backtest
+  windows and `step` are explicit `run_backtest` arguments recorded in
+  `backtest_run.params`.
+- **Logging / observability:** structured stderr logging in ingestion and the
+  harness (rows ingested, as_of progress, signals fired/rejected); the
+  `directional_signal` and `backtest_run`/`backtest_result` tables are the durable
+  audit trail. No dashboard (non-goal).
+- **Testing strategy (what gets which layer):**
+  - *Unit* (standalone `python3 tests/<file>.py`, repo convention, no pytest dep):
+    fee math, EV/Kelly, `prob_fn` placeholder determinism and PIT boundary,
+    candlestick/resolution parsing, report metric math on synthetic PnL.
+  - *Integration:* KalshiSource against recorded/fixture API responses (no live
+    network in CI); persistence round-trip (US-1 write/read idempotency) against a
+    local Timescale; harness end-to-end on a small **fixture** window with the
+    placeholder model.
+  - *E2E / acceptance:* one documented multi-month real-Kalshi backtest producing
+    the report with zero manual patching (success metric 1), and the US-7 audit
+    passing on it (success metric 3). These are run manually against live data, not
+    in CI.
+  - The US-7 point-in-time audit is itself the definition-of-done test for US-5.
+```

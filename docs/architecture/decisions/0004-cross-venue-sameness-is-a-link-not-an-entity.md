@@ -1,3 +1,7 @@
+> **Status: PARKED, not active (2026-07-17).** Governs cross-venue arb assembly,
+> which is out of the single-venue (Kalshi) directional-EV MVP. Kept in-repo and
+> demo-green; **not enforced against the current plan.**
+
 # Cross-venue sameness is a link, not an entity
 
 When the same real-world question is listed on both venues, fairline models it as

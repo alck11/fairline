@@ -1,3 +1,7 @@
+> **Status: PARKED, not active (2026-07-17).** A copy-trade basket decision; the
+> copy-trade subsystem is parked out of the Kalshi directional-EV MVP. Kept in-repo
+> and demo-green; **not enforced against the current plan.**
+
 # Baskets are category-scoped by a specialism filter, not per-category scores
 
 `build_basket(scored, category, ...)` must return the top-k wallets *specialized

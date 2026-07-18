@@ -1,302 +1,270 @@
-# Implementation Plan — align code to the glossary & ADRs
+# Implementation Plan — directional-EV on Kalshi (MVP, paper-first)
 
-These work packages close the gaps a grilling pass found between the code and the
-decisions now recorded in [`CONTEXT.md`](../../CONTEXT.md) and
-[`docs/architecture/decisions/`](./decisions/). There is no `docs/product/requirements.md` yet, so work
-packages are traced to **glossary terms and ADRs** rather than user stories.
+> Written 2026-07-17 for the confirmed Kalshi pivot. The prior plan (arb/copy-trade,
+> WP-1..WP-8, all shipped) is at [`archive/plan.md`](./archive/plan.md) — historical
+> only. This is the live plan. Inputs: [`requirements.md`](../product/requirements.md)
+> (US-1..US-7), [`roadmap.md`](../product/roadmap.md) (Track A: A0–A4, Track B:
+> B1–B3), [`overview.md`](./overview.md), and ADR-0005/0006/0008/0009/0010.
 
-Ordering is by dependency then correctness-risk. Each package is independently
-reviewable and leaves the demos (`python3 src/<file>.py`) green.
+## Structure
 
----
+Two interleaved tracks. **Track A (plumbing) is the critical path; when tracks
+conflict, A wins.** The `prob_fn` contract (WP-2) is defined in week 1 so both
+tracks build against it. Track B reaches a **calibration GO/NO-GO gate** (WP-7)
+that can shortcut the expensive model build (WP-8). Estimates are developer-days
+(one dev, ~6 hrs/day), carried from the roadmap.
 
-## WP-1 — Collapse arb taxonomy to `complete_set | cross_venue` ✅ (done 2026-07-11)
+```
+Track A:  WP-1 ─▶ WP-2 ─▶ WP-3 ─▶ WP-4 ─▶ WP-5      (critical path; proven on placeholder)
+                    │              ▲
+Track B:  WP-6 ─▶ WP-7 ─(GO)──▶ WP-8 ──┘             (drops into WP-4; NO-GO stops here)
+```
+Calibration gate reached after WP-1,2 + WP-6,7 (~11–19 dev-days) → decide
+build-real-model (WP-8) or KILL. Each WP is independently reviewable and leaves the
+parked demos (`python3 src/<file>.py`) and existing tests green.
 
-**Traces to:** ADR (arb taxonomy), CONTEXT.md → _Complete set_, _Cross-venue_.
-**Why:** `bundle` and `multi` are the same structure (a within-venue complete
-set); the split is an implementation detail, not a domain distinction.
-
-**Delivered:** [`src/detector.py`](../../src/detector.py) — merged
-`bundle_edge` and `multi_outcome_edge` into `complete_set_edge(size, *, venue,
-category, prices: Sequence[float])` (binary case is `prices=[yes, no]`),
-`kind="complete_set"`; `cross_venue_edge` left byte-identical.
-[`schema/001_schema.sql`](../../schema/001_schema.sql) comment and
-[`README.md`](../../README.md)'s detector row updated to match; `__main__`
-demo now asserts both `kind` literals.
-
-**Testing:** QA PASS — demo prints a within-venue complete-set opportunity and
-a cross-venue one with the exact two allowed `kind` strings; no `"bundle"`/
-`"multi"` references remain in code; downstream consumers (`ev_detector.py`,
-`risk_execution.py`) don't read `Opportunity.kind` so nothing broke there.
-
-**Follow-up resolved (2026-07-17):** `complete_set_edge` regained per-leg maker
-flags — `maker: bool | Sequence[bool] = False`, broadcast to every leg when a
-single bool, or matched 1:1 against `prices` when a sequence (mismatched
-lengths raise `ValueError`). A within-venue complete set can now mix resting
-(fee-free, rebate-earning) and taker legs same as the old `bundle_edge` could.
-Also added the empty-legs guard: `complete_set_edge(prices=[])` now raises
-`ValueError` instead of silently returning a fake full-notional "profit".
-Demo in `src/detector.py`'s `__main__` extended to assert: an all-maker fill
-has zero fees and strictly higher net profit than the all-taker fill at the
-same prices; a mixed `[True, False]` fill's fees land strictly between the
-all-taker and all-maker cases; empty `prices` raises. No other caller exists
-in the repo (only the demo calls `complete_set_edge`), so the added keyword
-arg is non-breaking.
+Every WP touching runtime code adds a standalone test under `tests/` following the
+repo convention (`python3 tests/<file>.py`, no pytest dependency).
 
 ---
 
-## WP-2 — Matcher: embeddings triage only, never auto-link ✅ (done 2026-07-11)
+## WP-1 — Storage + persistence spine  *(A0, US-1)* — 3–5 dev-days
 
-**Traces to:** ADR-0002, CONTEXT.md → _Triage_, _Escalate_, _Match_.
-**Why:** auto-linking at cosine ≥ 0.92 with hardcoded polarity +1 produces
-guaranteed losses on negation/three-way markets (cut/hold/raise). Only reading
-both resolution rule-sets can write a link.
-
-**Delivered:** [`src/market_matcher.py`](../../src/market_matcher.py) — removed
-the `sim >= AUTO_LINK → MatchResult(...,"embedding")` branch entirely; `AUTO_LINK`
-retired (no repurposed use needed). New routing: `sim < ESCALATE` → `None`
-(discard); `sim >= ESCALATE` → `confirmer(...)`, always. Only `'llm'` (confirmer)
-and `'manual'` (human inserts elsewhere) remain possible `MatchResult.method`
-values. [`README.md`](../../README.md)'s matcher row and
-[`schema/001_schema.sql`](../../schema/001_schema.sql)'s `market_link.method`
-comment updated to match — `'embedding'` is no longer documented as a valid
-method anywhere.
-
-**Testing:** QA PASS — near-identical pair now **escalates** (`method='llm'`)
-instead of auto-linking; orthogonal pair still discards to `None`; boundary
-case `sim == ESCALATE` confirmed to escalate (not discard), consistent with the
-`>=` semantics; `ESCALATE` constant itself unchanged (0.70), so the triage floor
-wasn't accidentally loosened. No other module (`risk_execution.py`,
-`ev_detector.py`) depends on `AUTO_LINK` or assumes `method="embedding"`.
-
----
-
-## WP-3 — Baskets are category-scoped ✅ (done 2026-07-12)
-
-**Traces to:** ADR-0007 (basket scope), ADR-0003 (leakage/survivorship),
-CONTEXT.md → _Basket_.
-**Why:** `build_basket` takes `category` but ignores it; baskets are meant to be
-top-k specialists *within* a category.
-
-**Decision (ADR-0007):** a **specialism filter over the single Score**, not
-per-category scores. Keep the one composite `score` as the ranking; make
-`category` a *selection* filter that admits only wallets genuinely concentrated
-in that category. Per-category rescoring (the "more correct" option) is rejected
-as premature complexity that also contradicts the glossary's single-Score
-definition and worsens the ADR-0003 min-sample/survivorship discipline; it stays
-open as future work only if the base copy strategy proves edge *and* per-category
-skill divergence is shown to matter. See ADR-0007 for the full rationale.
-
-The specialism metadata is derived from the history `features_for_wallet` has
-**already** point-in-time-filtered (`resolve_ts < as_of`), so it inherits
-ADR-0003's no-leakage guarantee for free and touches neither the forward label
-nor the CV.
-
-**Changes**
-- [`src/wallet_features.py`](../../src/wallet_features.py) `features_for_wallet`:
-  add three columns computed from the already-filtered `hist` (do **not** change
-  the `hist`/`resolve_ts < as_of` filter, and do **not** touch `forward_label`):
-  - `dominant_category` — the category with the most resolved trades; break ties
-    deterministically (e.g. highest total stake, then lexical) so panels are
-    reproducible.
-  - `dominant_category_share` — that category's fraction of the wallet's resolved
-    trades (`max(value_counts(normalize=True))`).
-  - `dominant_category_n` — its resolved-trade count.
-  Leave `hhi_category` unchanged. These columns flow through `build_feature_panel`
-  (it just collects the dicts) and survive `composite_score` (it only adds
-  `score`), so they reach `build_basket` on the `scored` frame.
-- [`src/wallet_scoring.py`](../../src/wallet_scoring.py): **do not** add the new
-  columns to `FEATURE_COLS` — they are selection metadata, not model features
-  (`dominant_category` is a string and would break the regressor; per-category
-  ROI as an ML feature is a separate later question). `FEATURE_COLS`,
-  `forward_label`, `build_training_table`, and the purged CV stay untouched.
-  Rewrite `build_basket` to:
-  ```python
-  def build_basket(scored, category, *, top_k=8, min_score=70.0,
-                   min_share=0.5, min_category_trades=5):
-      pool = scored[
-          (scored["dominant_category"] == category)
-          & (scored["dominant_category_share"] >= min_share)
-          & (scored["dominant_category_n"] >= min_category_trades)
-          & (scored["score"] >= min_score)
-      ].copy()
-      pool = pool.sort_values("score", ascending=False)
-      return pool["wallet"].head(top_k).tolist()
-  ```
-  Defaults: `min_share=0.5` (a specialist trades a majority in one category),
-  `min_category_trades=5` (mirrors the existing `len(hist) >= 5` sample floor,
-  now applied *within* the category), `min_score=70.0` unchanged. A wallet is a
-  specialist in at most one category, so it belongs to at most one basket —
-  consistent with "one basket per category."
-- **Demo data must produce specialists.** Uniformly-random trade categories
-  (`rng.choice([...])` per trade, as in both `__main__` blocks today) yield
-  almost no wallet clearing a 0.5 share floor, so every basket comes back empty.
-  Update the `wallet_scoring.py` demo generator (and `wallet_features.py`'s if
-  used in the test) to give each wallet a *home* category it trades with high
-  probability, so distinct, non-empty baskets exist to demonstrate.
-
-**Testing:** QA PASS — two baskets for two categories return **different**,
-category-appropriate wallet sets on the (specialism-bearing) demo data (8
-crypto + 8 politics, zero overlap, all 120 wallets checked pairwise-disjoint
-across all 3 demo categories with no score floor applied); every wallet
-returned for `category=X` has `dominant_category == X`; a deliberately
-diversified wallet (share < `min_share`) appears in **neither** basket; an
-unspecialized category returns `[]` gracefully. Leakage boundary re-verified
-directly: a wallet with 5 pre-`as_of` "politics" trades and 100 higher-volume
-post-`as_of` "crypto" trades still resolves to `dominant_category=="politics"`
-— confirms zero leakage from ADR-0003's `resolve_ts < as_of` filter. Tie-break
-(count → stake → lexical) verified deterministic across `PYTHONHASHSEED`
-variations. `FEATURE_COLS`, `forward_label`, `build_training_table`, and the
-purged CV are byte-identical; the xgboost path is unaffected. New regression
-test: [`tests/test_wallet_basket_specialism.py`](../../tests/test_wallet_basket_specialism.py).
-
-**Blocked-by:** none — architecture call resolved by ADR-0007.
+1. **Goal.** Provision PostgreSQL + TimescaleDB and a persistence layer so ingested
+   Kalshi data and backtest output survive between runs. Serves **US-1**; unblocks
+   every other WP.
+2. **Scope.** New `schema/002_kalshi_ev.sql` (the five tables in ADR-0010:
+   `candlestick`, `weather_forecast`, `weather_observation`, `directional_signal`,
+   `backtest_run`, `backtest_result`). New `src/store.py` — a thin persistence layer:
+   connection from env, idempotent upserts, and the point-in-time read helpers the
+   `ProbFn` reader needs. README setup section for DB provisioning.
+3. **Inputs.** `schema/001_schema.sql` (base dimension tables, unchanged);
+   ADR-0010 (table shapes + upsert keys); `ingest.py` row dataclasses (existing +
+   the `Candle`/`ResolutionRow` added in WP-3 — WP-1 defines their target columns).
+4. **Outputs / signatures.**
+   - `schema/002_kalshi_ev.sql` applied on top of `001`.
+   - `src/store.py`:
+     `connect() -> Connection`;
+     `upsert_market(conn, MarketRow) -> int` (returns market_id, idempotent on
+     `(venue, external_id)`); `upsert_outcomes(conn, market_id, outcomes)`;
+     `upsert_candles(conn, list[Candle])`; `apply_resolutions(conn, list[ResolutionRow])`;
+     `upsert_forecasts(conn, rows)`; `upsert_observations(conn, rows)`;
+     `write_signal(conn, run_id, DirectionalSignal, as_of)`;
+     `write_backtest_run(conn, ...) / write_backtest_result(conn, ...)`;
+     PIT readers `candles_before(conn, token_id, as_of) -> list[Candle]`,
+     `forecasts_before(...)`, `observations_before(...)` (all enforce `< as_of` in SQL).
+5. **Acceptance (US-1 G/W/T).** A round-trip test writes and reads back a Kalshi
+   market, a candlestick, and a resolved outcome identically; **re-running the same
+   writes is idempotent** (row counts unchanged, values updated not duplicated).
+   PIT readers never return a row dated `>= as_of` (boundary test at exactly `as_of`).
+6. **Boundaries.** Do **not** modify `schema/001_schema.sql` or any parked table.
+   Do **not** add business logic (EV, sizing, model) here — persistence only. Do
+   **not** open network/API connections (that is WP-3).
 
 ---
 
-## WP-4 — Consensus needs a participation floor ✅ (done 2026-07-11)
+## WP-2 — `prob_fn` interface contract + placeholder  *(A2, US-3; week 1)* — 1–2 dev-days
 
-**Traces to:** ADR (consensus, option C), CONTEXT.md → _Consensus_,
-_Participation_.
-**Why:** `execute_copy` takes a bare `basket_agreement` float; one wallet trading
-alone reads as 100% consensus. Consensus must be agreement among *participants*,
-valid only above a floor.
-
-**Delivered:** [`src/risk_execution.py`](../../src/risk_execution.py) — added
-`min_participation: int = 3` to `RiskLimits`; new `consensus_gate(agree_count,
-participant_count, basket_size, limits) -> (bool, float, str)` rejects
-unconditionally when `participant_count < min_participation`, otherwise gates
-`agree_count/participant_count` (never diluted by `basket_size`) against
-`basket_consensus`. `execute_copy`'s signature changed to
-`(wallet, leg, agree_count, participant_count, basket_size)` — no other caller
-existed in the repo, confirmed by grep. First regression test added:
-[`tests/test_risk_execution_consensus.py`](../../tests/test_risk_execution_consensus.py)
-(standalone, no pytest dependency — matches the repo's `python3 <file>.py`
-convention).
-
-**Testing:** QA PASS — 1-of-1 participation rejected (below floor) even at
-100% agreement; 4-of-5 passes; 3-of-8 (3 participants out of an 8-member
-basket, whole-basket denominator would fail the gate at 0.375) passes when
-correctly evaluated on participants (3/3 = 1.0). Both the floor boundary
-(`participant_count == min_participation`) and the consensus boundary
-(`agreement == basket_consensus`) are inclusive and tested. `_check`,
-`execute_arb`, kill switch, and all other risk-gate logic verified untouched.
-
-**Follow-up resolved (2026-07-17):** `consensus_gate` now guards
-`participant_count == 0` independently of the floor comparison, so
-`RiskLimits(min_participation=0)` ("no floor") with zero participants returns
-`(False, 0.0, "no participants (0/N)")` instead of raising
-`ZeroDivisionError`. It also validates `agree_count <= participant_count <=
-basket_size` and rejects negative counts, raising `ValueError` on any of
-those — nonsensical shapes that can only come from an upstream counting bug,
-so they're no longer silently gated as if they were a legitimate (if
-malformed) basket. The two regression tests in
-`tests/test_risk_execution_consensus.py` that documented the old
-bug/no-validation behavior (`test_BUG_zero_division_when_min_participation_is_zero`,
-`test_no_upper_bound_validation_on_agree_count_or_participant_count`) were
-rewritten to assert the fixed behavior
-(`test_zero_participants_is_safe_even_with_no_floor`,
-`test_inconsistent_counts_raise_value_error`). No caller in the repo passes
-malformed counts today (`execute_copy`'s only caller is the demo, with
-well-formed inputs), so this is non-breaking.
+1. **Goal.** Fix the stable `prob_fn` contract both tracks build against, and a
+   placeholder that unblocks the harness before the real model exists. Serves
+   **US-3**; traces to **ADR-0009**.
+2. **Scope.** New `src/prob_fn.py`: `MarketRef`, `ProbFn` Protocol, `MidpriceProbFn`
+   (the placeholder = baseline), optional `ClimatologyProbFn`.
+3. **Inputs.** ADR-0009 (the exact contract); `store.py` PIT readers from WP-1
+   (`candles_before`); `ingest.py` `Candle` type.
+4. **Outputs / signatures.** Exactly ADR-0009:
+   `class ProbFn(Protocol)` with `name: str` and
+   `__call__(self, market: MarketRef, as_of: datetime) -> float`;
+   `MidpriceProbFn(reader).__call__` returns the last candle `close` with
+   `ts < as_of` (raises/returns per contract if none); output clamped-validated to
+   [0,1]. `MarketRef` frozen dataclass as specified.
+5. **Acceptance (US-3 G/W/T).** `ev_detector.find_signal` consumes a scalar derived
+   from the placeholder unchanged (demonstrated via the WP-4 harness adapter);
+   swapping `MidpriceProbFn` for a different `ProbFn` requires **no** change to the
+   contract or the harness call site. Placeholder is deterministic and honors the
+   `< as_of` boundary (unit test).
+6. **Boundaries.** Do **not** build any real/weather model here (that is WP-8). Do
+   **not** modify `ev_detector.py`. Do **not** read data outside the WP-1 PIT
+   readers (no direct SQL, no future rows).
 
 ---
 
-## WP-5 — Kill switch latches in live mode ✅ (done 2026-07-12)
+## WP-3 — `KalshiSource` data adapter  *(A1, US-2)* — 4–7 dev-days
 
-**Traces to:** ADR-0001, CONTEXT.md → _Kill switch_.
-**Why:** `_roll_day` clears `kill` at the UTC day roll in *both* modes. Live must
-require manual re-arm; auto-reset is paper-only (unattended replays).
-
-**Delivered:** [`src/risk_execution.py`](../../src/risk_execution.py) —
-`_roll_day(self, mode)` only auto-clears `kill` when `mode == "paper"`;
-`realized_today` still resets unconditionally every day roll in both modes.
-New `Engine.rearm()` — the explicit human/live re-arm path — clears both `kill`
-and `realized_today` together (a human re-arming is domain-equivalent to
-"start the day's loss accounting fresh from here," the same semantic
-`_roll_day` already applies automatically at UTC midnight in paper mode).
-New [`tests/test_risk_execution_killswitch.py`](../../tests/test_risk_execution_killswitch.py)
-(standalone, matches `test_risk_execution_consensus.py`'s conventions).
-
-**Testing:** QA FAIL → fix → PASS. First pass caught a Major bug: `rearm()`
-cleared `kill` but left the stale negative `realized_today` in place, so the
-very next `settle()` call — even one settling a brand-new profit, same day, no
-roll — re-tripped the kill switch against the carried-over value, making
-`rearm()` non-functional beyond a single `_check()` window. Fixed by having
-`rearm()` reset `realized_today` too. Re-verified: paper auto-resets `kill`
-across a simulated day roll; live stays latched across multiple consecutive
-day rolls until `rearm()` is called; `realized_today` still resets every day
-roll in both modes (unaffected by the fix); `_check`/`execute_arb`/`_fill`/
-`_unwind`/`consensus_gate`/`execute_copy` byte-identical throughout.
-
-**Follow-up resolved (2026-07-17):** product decision (log + rate-limit,
-chosen over log-only, no-op-when-not-tripped, and leave-as-is) — `rearm()`
-now logs every call, successful or blocked, to the blotter (status `"rearm"`
-/ `"rearm_blocked"`) recording the `realized_today` value being zeroed (the
-masked loss) and whether `kill` was actually set. New
-`RiskLimits.max_rearms_per_day: int = 1` caps successful rearms per calendar
-day; the counter (`RiskState.rearms_today`) resets at the same day roll that
-resets `realized_today`. Once the cap is exhausted, `rearm()` raises
-`RuntimeError` instead of silently no-op'ing, closing the loop that let a
-human absorb unbounded daily loss one rearm at a time (previously verified:
-5× `settle(-90)`+`rearm()` absorbed -$450 against a $100 limit). `rearm()`'s
-return type changed from `None` to the audit-row `dict`; no caller in the
-repo used the return value, and no test calls `rearm()` more than once per
-engine per day, so the default cap doesn't break existing behavior. Three new
-regression tests added to `tests/test_risk_execution_killswitch.py`:
-log content, cap enforcement (raises, leaves state untouched), and cap reset
-at the day roll.
+1. **Goal.** Kalshi market data + history behind the venue-neutral data interface,
+   so the rest of the stack never sees Kalshi specifics. Serves **US-2**; traces to
+   **ADR-0006** (data adapter; data/wallet split).
+2. **Scope.** Add `MarketDataSource` Protocol + `Candle`/`ResolutionRow` dataclasses
+   to `src/ingest.py`. New `src/ingest_kalshi.py` (`KalshiSource`). An ingest
+   entry-point/script that pulls weather+econ markets, candles, trades, resolutions
+   into the store (via WP-1). README ingestion section.
+3. **Inputs.** `src/ingest.py` (existing Protocol/row types); `store.py` upserts
+   (WP-1); Kalshi public REST/WS API (no trading auth); `fees.py` (Kalshi coefficient,
+   already present) for `market.fee_rate`.
+4. **Outputs / signatures.**
+   - `ingest.py`: `MarketDataSource` Protocol (`list_markets`, `orderbook`,
+     `candlesticks(token_id, *, start, end, period='1h') -> list[Candle]`,
+     `resolutions(external_ids) -> list[ResolutionRow]`); frozen `Candle`
+     (`ts, token_id, open, high, low, close, volume`), `ResolutionRow`
+     (`external_id, outcome_token_id, resolved_value, resolved_at`).
+   - `ingest_kalshi.py`: `KalshiSource` implementing `MarketDataSource`;
+     `wallet_trades`/`leaderboard` raise `NotImplementedError("Kalshi exposes no
+     public per-trader feed")`; graceful degradation (clear message, non-zero exit)
+     on API/rate-limit failure.
+5. **Acceptance (US-2 G/W/T).** A documented backtest window of real Kalshi
+   weather/econ markets loads with resolved outcomes and **no manual patching**;
+   the adapter exits non-zero with a clear error on API/rate-limit failure; **no
+   trading/execution code is present** (data only). Integration test runs against
+   recorded fixture responses (no live network in CI).
+6. **Boundaries.** Do **not** implement order placement or any auth'd/trading
+   endpoint. Do **not** touch `ingest_polymarket_cli.py` (parked) or the full
+   `MarketSource` Protocol's existing methods. Do **not** compute EV/sizing here.
 
 ---
 
-## WP-6 — README & naming cleanup ✅ (done 2026-07-13)
+## WP-4 — EV backtest harness  *(A3, US-5)* — 5–8 dev-days
 
-**Traces to:** CONTEXT.md header (name decision).
-**Why:** README title still says `polymkt-arb`; `fairline` is canonical.
-
-**Delivered:** [`README.md`](../../README.md) title, ADR pointer, collapsed
-arb-kind row (WP-1), and triage-only matcher row (WP-2) were already correct —
-carried along incidentally by the WP-1/WP-2 commits. The one gap was WP-3
-(done after those rows were last touched): the `wallet_features.py` and
-`wallet_scoring.py` rows didn't mention category-scoped baskets. Updated both
-rows to note the dominant-category features and the category-scoped,
-ADR-0007-gated `build_basket`.
-
-**Testing:** none (docs) — re-ran `src/wallet_scoring.py`'s demo to confirm
-the row's description (disjoint, category-appropriate, non-empty baskets)
-still matches current behavior.
-
----
-
-## WP-7 — Ingestion: MarketSource interface + polymarket-cli backend ✅ (done 2026-07-11)
-
-**Traces to:** ADR-0006, `docs/research/2026-07-11-polymarket-cli-and-ev-references.md`.
-**Delivered:** `src/ingest.py` (MarketSource Protocol, row dataclasses shaped
-for the schema tables, FakeSource demo) and `src/ingest_polymarket_cli.py`
-(subprocess adapter over `polymarket -o json`, no-auth public data only,
-graceful skip when the binary is absent).
-**Testing:** both demos run standalone; CLI demo degrades to exit 0 without the
-binary. **Follow-up:** live-binary smoke run once polymarket-cli is installed;
-`KalshiSource` is future work.
-
----
-
-## WP-8 — Directional-EV prototype ✅ (done 2026-07-11)
-
-**Traces to:** ADR-0005, CONTEXT.md → _Directional_, _EV_, _Signal (directional)_.
-**Delivered:** `src/ev_detector.py` — post-fee EV per share (via `fees.Leg`),
-depth-aware sizing (via `detector.vwap_fill`), fractional-Kelly cap
-(quarter-Kelly default), `DirectionalSignal` output (not an Opportunity,
-never written to `arb_opportunity`). Probability model injected via `prob_fn`.
-**Testing:** demo shows a positive-EV signal Kelly-capped into the book and a
-no-edge case returning None. **Follow-up:** a `signal` audit table; a real
-`prob_fn` (weather-style horizon, not latency-competitive 5-min markets).
+1. **Goal.** Replay Kalshi history and generate fee-aware, Kelly-capped directional
+   signals through the paper Engine, producing realized hold-to-resolution PnL.
+   Serves **US-5**; traces to **ADR-0005**. The core missing piece.
+2. **Scope.** New `src/backtest.py` (the replay loop). One **additive** method on
+   `src/risk_execution.py`: `Engine.execute_signal`. Persist signals + results via
+   WP-1.
+3. **Inputs.** `store.py` PIT readers (WP-1); `prob_fn.ProbFn` (WP-2); Kalshi data
+   in the store (WP-3); `ev_detector.find_signal` + `fees.Leg` (built);
+   `risk_execution.Engine` + `RiskLimits` (built).
+4. **Outputs / signatures.**
+   - `backtest.run_backtest(store, prob_fn, *, category, start, end, step, limits,
+     run_id) -> BacktestSummary`. Per `as_of` step: price = last candle `ts < as_of`;
+     `p = prob_fn(MarketRef, as_of)`; `find_signal(..., prob_fn=lambda _tok: p, ...)`;
+     `Engine.execute_signal(signal, category=...)`; on resolution
+     `Engine.settle(realized_pnl)` and `store.write_backtest_result(...)`.
+   - `risk_execution.Engine.execute_signal(self, signal, *, category) -> dict` —
+     routes a `DirectionalSignal` through `_check` + `_fill`, records to the blotter,
+     never writes `arb_opportunity`.
+5. **Acceptance (US-5 G/W/T).** No decision at time T uses any data (forecast or
+   price) dated `>= T`; fees use the Kalshi formula; the paper kill switch and
+   exposure caps are active; **total PnL reconciles to the sum of per-signal realized
+   PnL**; the harness runs identically against the placeholder and (later) the real
+   model. Runs end-to-end on a small fixture window in CI.
+6. **Boundaries.** Do **not** modify `ev_detector.py`, `fees.py`, or the existing
+   `Engine` gate/kill-switch/`execute_arb`/`execute_copy` logic (only *add*
+   `execute_signal`). Do **not** implement live execution. Do **not** build the
+   report or the leakage audit (WP-5).
 
 ---
 
-## Suggested sequence
+## WP-5 — Fee-aware report + baseline + leakage audit  *(A4, US-6 + US-7)* — 3–5 dev-days
 
-WP-1 → WP-2 → WP-4 → WP-5 → WP-3 → WP-6.
-All work packages (WP-1 through WP-8) are done. README reflects the collapsed
-arb kinds, the triage-only matcher, category-scoped baskets, and the three
-ingestion/EV modules.
+1. **Goal.** One report that says whether the model beat the market after fees, plus
+   an automated point-in-time audit that the result is honest. Serves **US-6, US-7**;
+   traces to **ADR-0009** (PIT) and the ADR-0003 leakage principle.
+2. **Scope.** New `src/report.py` (metrics + baseline) and `src/audit.py` (leakage
+   check). Both read only stored tables (WP-1).
+3. **Inputs.** `backtest_run` / `backtest_result` / `directional_signal` tables
+   (WP-1, populated by WP-4); a completed backtest for the model and for the
+   `MidpriceProbFn` baseline (same window, WP-2/WP-4).
+4. **Outputs / signatures.**
+   - `report.build_report(store, run_id, baseline_run_id) -> Report` showing net
+     (post-Kalshi-fee) PnL, ROI, hit rate, Brier/calibration of `p_model`, Sharpe,
+     max drawdown, per-market-type breakdown, and the same metrics for the baseline;
+     **headline = model net ROI − baseline net ROI as one number**; reproducible
+     from stored tables without re-ingest.
+   - `audit.audit_run(store, run_id) -> AuditResult`; **exits non-zero** on any
+     signal whose `as_of`/price/forecast input drew on data timestamped `>= as_of`.
+5. **Acceptance (US-6/US-7 G/W/T).** Report headline is one number (model minus
+   baseline net ROI), reproducible from tables; audit fails loudly (non-zero exit)
+   on a seeded lookahead violation and passes on a clean run. The audit is part of
+   the backtest's definition of done.
+6. **Boundaries.** Do **not** re-run ingestion or the harness inside the report
+   (read stored tables only). Do **not** add early-exit/mark-to-market PnL (PnL is
+   hold-to-resolution — CONTEXT.md). No UI/dashboard.
+
+---
+
+## WP-6 — NOAA/NWS bulk data acquisition  *(B1, US-4 data)* — 3–5 dev-days
+
+1. **Goal.** Load NOAA/NWS forecast + observation history aligned to Kalshi weather
+   markets, so Track B has point-in-time inputs. Serves **US-4 (data)**.
+2. **Scope.** New `src/weather_ingest.py` — download/parse NOAA/NWS bulk forecast +
+   observation data into `weather_forecast` / `weather_observation` (WP-1 upserts).
+   Runs in parallel with A on download waits.
+3. **Inputs.** `store.py` upserts (WP-1, tables from ADR-0010); Kalshi weather
+   markets in the store (WP-3) to know which stations/variables/dates matter.
+4. **Outputs / signatures.** `weather_ingest.load_forecasts(...)` /
+   `load_observations(...)` populating the tables with correct `issued_at`
+   (forecast) and `observed_at` (observation) PIT keys; idempotent re-run.
+5. **Acceptance.** Forecast history for the target stations/variables loads with
+   `issued_at < valid_at` on every row; observations cover the resolution dates of
+   the loaded Kalshi weather markets; re-running does not duplicate rows.
+6. **Boundaries.** Do **not** build the calibration study (WP-7) or any model
+   (WP-8). Do **not** touch Track A modules. `issued_at` must be the true forecast
+   publication time — never back-filled from `valid_at`.
+
+---
+
+## WP-7 — Calibration study (edge-room GO/NO-GO gate)  *(B2, US-4 study)* — 3–5 dev-days
+
+1. **Goal.** Decide, per market type, whether Kalshi weather prices already track
+   public forecasts — i.e. whether there is edge room worth a model. Serves **US-4
+   (study)**. **This is the GO/NO-GO gate for WP-8.**
+2. **Scope.** New `src/calibration.py` — align Kalshi weather candles (WP-3) to
+   NOAA/NWS forecasts (WP-6) at matching `as_of`, measure how closely price tracks
+   the forecast-implied probability and the residual (lag/miss).
+3. **Inputs.** `candlestick`, `weather_forecast`, `weather_observation` (WP-1/3/6);
+   PIT readers (WP-1) — the study itself must be point-in-time honest.
+4. **Outputs / signatures.** `calibration.run_study(store, *, category='weather',
+   window) -> CalibrationReport` reporting, per market type, price-vs-forecast
+   tracking and the residual, and a **clear GO/NO-GO signal** ("Kalshi prices lag
+   public forecasts by X on type Y → edge room" vs "already efficient → no room").
+5. **Acceptance (US-4 G/W/T).** Outputs a clear per-market-type GO/NO-GO; a NO-GO is
+   a **valid, non-blocking** outcome that stops Track B before WP-8. Uses only
+   pre-`as_of` forecast data (same PIT discipline as the backtest).
+6. **Boundaries.** Do **not** build the predictive model (WP-8) — this only measures
+   edge *room*. Do **not** gate Track A on the result (A proves plumbing on the
+   placeholder regardless).
+
+---
+
+## WP-8 — `prob_fn` v1 weather model  *(B3, implements US-3)* — 6–12 dev-days — GATED on WP-7 GO
+
+1. **Goal.** A research-grade weather probability model implementing the `ProbFn`
+   contract, turning NOAA/NWS forecasts into an outcome probability that (hopefully)
+   beats price. Implements **US-3** with a real model. **The dominant risk. Built
+   only if WP-7 returns GO.**
+2. **Scope.** New `src/weather_model.py` — a `ProbFn` implementation
+   (`WeatherProbFn`) mapping forecast + climatology inputs to `p` for temperature /
+   hurricane markets.
+3. **Inputs.** `ProbFn` contract + `MarketRef` (WP-2); `weather_forecast` /
+   `weather_observation` via WP-1 PIT readers; WP-7 GO verdict; the WP-4 harness
+   (unchanged) to evaluate it.
+4. **Outputs / signatures.** `WeatherProbFn(reader).__call__(market: MarketRef,
+   as_of) -> float` conforming to ADR-0009 (reads only `< as_of` data). Drops into
+   `run_backtest` by passing it where `MidpriceProbFn` went — **no harness change.**
+5. **Acceptance.** The harness runs the model unchanged (US-3 acceptance); the WP-5
+   report shows its out-of-sample net ROI vs. the baseline; the WP-5 audit passes on
+   the run (no lookahead). A negative result is a valid, capital-saving verdict.
+6. **Boundaries.** Do **not** modify the harness, `ev_detector`, or the contract to
+   fit the model — the model conforms to them. If trained on history, obey ADR-0003's
+   purged-CV / no-shared-sample discipline. Do **not** start before WP-7 GO.
+
+---
+
+## Traceability
+
+| WP | Phase | Stories | ADRs | Depends on |
+|----|-------|---------|------|-----------|
+| WP-1 | A0 | US-1 | 0010 | — |
+| WP-2 | A2 | US-3 | 0009, 0005 | WP-1 |
+| WP-3 | A1 | US-2 | 0006, 0008 | WP-1 |
+| WP-4 | A3 | US-5 | 0005, 0009 | WP-1, WP-2, WP-3 |
+| WP-5 | A4 | US-6, US-7 | 0009, 0003(principle) | WP-1, WP-4 |
+| WP-6 | B1 | US-4(data) | 0010 | WP-1, WP-3 |
+| WP-7 | B2 | US-4(study) | 0009 | WP-3, WP-6 |
+| WP-8 | B3 | US-3(real) | 0009, 0005 | WP-2, WP-6, WP-7=GO |
+
+**Critical path:** WP-1 → WP-2 → WP-3 → WP-4 → WP-5 (~16–27 dev-days, proven on the
+placeholder). **Gate at WP-1,2 + WP-6,7** (~11–19 dev-days): GO → WP-8, NO-GO →
+stop with a defensible "no exploitable edge room" verdict. Full MVP: ~28–49
+dev-days. Live (IBKR, ADR-0008) is post-MVP, reached only through a passing
+backtest **and** forward paper, inside the risk gates (ADR-0001) — never around them.

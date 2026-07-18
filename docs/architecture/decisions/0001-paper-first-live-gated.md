@@ -1,5 +1,13 @@
 # Paper-first: live order placement is deliberately unimplemented and gated
 
+> **Note (2026-07-17): unchanged and still binding.** The pivot to Kalshi
+> directional-EV does not touch this decision — no live/real-money execution ships
+> in the MVP; `Engine.place_live` still raises. One reference updates: the eventual
+> live path is now intended to be **IBKR** (ADR-0008), not the py-clob-client / CLI
+> mentioned below. Those Polymarket-specific candidates are superseded; the *gate*
+> (live goes inside the risk gates, only after a passing backtest and forward paper)
+> is exactly as written.
+
 Fairline ships with **no live order placement**. `Engine.place_live` raises by
 design, and the entire stack — ingestion, detection, scoring, risk engine — runs
 end-to-end on paper before a cent is at risk. The trade-off is time-to-market vs.
@@ -19,10 +27,15 @@ eventually implemented, two hardenings decided during design are mandatory:
 - **Live cross-venue arbs may only execute against `verified` links** — a human
   must have confirmed the cross-venue match by reading both resolution rule-sets.
   Paper may trade unverified links; that is how the review queue is built without
-  risk.
+  risk. (Cross-venue arb is *parked* in the current MVP — ADR-0004 — but the gate
+  stands for whenever it is revived.)
 
 ## Consequences
 
 Live placement, when built, goes *inside* the existing risk gates (notional /
 exposure / wallet caps, daily-loss kill switch, basket-consensus, atomic
-all-legs-or-none arb handling) — never around them.
+all-legs-or-none arb handling) — never around them. For the current MVP the live
+path is an IBKR execution adapter (ADR-0008), reached only through a passing
+backtest **and** positive forward paper (roadmap v0.2). The py-clob-client / CLI
+references elsewhere in the codebase were Polymarket-era placeholders and are
+superseded by that IBKR path.
