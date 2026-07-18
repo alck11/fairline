@@ -204,20 +204,41 @@ def test_idempotent_rerun(conn):
         ts=ts, token_id="KXHIGHNY-26JUL20-IDEM-YES",
         open=0.40, high=0.44, low=0.39, close=0.42, volume=1200.0)])
 
+    station, variable = "KIDEM", "tmax_f"
+    issued_at = datetime(2026, 7, 19, 6, 0, tzinfo=timezone.utc)
+    valid_at = datetime(2026, 7, 20, 0, 0, tzinfo=timezone.utc)
+    store.upsert_forecasts(conn, [store.WeatherForecastRow(
+        issued_at=issued_at, valid_at=valid_at, station=station, variable=variable,
+        value=91.0, source="NWS", horizon_h=18.0)])
+
+    observed_at = datetime(2026, 7, 19, 6, 0, tzinfo=timezone.utc)
+    store.upsert_observations(conn, [store.WeatherObservationRow(
+        observed_at=observed_at, station=station, variable=variable,
+        value=88.0, source="NWS")])
+
     def counts():
         return conn.execute(
             "SELECT (SELECT count(*) FROM market), (SELECT count(*) FROM outcome), "
-            "(SELECT count(*) FROM candlestick)").fetchone()
+            "(SELECT count(*) FROM candlestick), "
+            "(SELECT count(*) FROM weather_forecast), "
+            "(SELECT count(*) FROM weather_observation)").fetchone()
 
     before = counts()
 
     # re-run the exact same market/outcome writes, and re-upsert the same
-    # candle with DIFFERENT values (as a real re-ingest of revised data would)
+    # candle/forecast/observation with DIFFERENT values (as a real re-ingest
+    # of revised data would)
     store.upsert_market(conn, market)
     store.upsert_outcomes(conn, market_id, market.outcomes)
     store.upsert_candles(conn, [store.Candle(
         ts=ts, token_id="KXHIGHNY-26JUL20-IDEM-YES",
         open=0.41, high=0.45, low=0.40, close=0.43, volume=1500.0)])
+    store.upsert_forecasts(conn, [store.WeatherForecastRow(
+        issued_at=issued_at, valid_at=valid_at, station=station, variable=variable,
+        value=93.0, source="NWS", horizon_h=18.0)])
+    store.upsert_observations(conn, [store.WeatherObservationRow(
+        observed_at=observed_at, station=station, variable=variable,
+        value=89.0, source="NWS")])
 
     after = counts()
     check(before == after, f"row counts changed on re-run: {before} -> {after}")
@@ -226,6 +247,16 @@ def test_idempotent_rerun(conn):
     check(len(back) == 1, f"idempotent upsert duplicated rows: {len(back)}")
     check((back[0].open, back[0].close, back[0].volume) == (0.41, 0.43, 1500.0),
           f"idempotent upsert should update values in place, got {back[0]}")
+
+    fr = store.forecasts_before(conn, station, variable, issued_at + timedelta(seconds=1))
+    check(len(fr) == 1, f"idempotent forecast upsert duplicated rows: {len(fr)}")
+    check(fr[0].value == 93.0,
+          f"idempotent forecast upsert should update value in place, got {fr[0]}")
+
+    orow = store.observations_before(conn, station, variable, observed_at + timedelta(seconds=1))
+    check(len(orow) == 1, f"idempotent observation upsert duplicated rows: {len(orow)}")
+    check(orow[0].value == 89.0,
+          f"idempotent observation upsert should update value in place, got {orow[0]}")
 
 
 def test_pit_boundary_exact_as_of(conn):
@@ -330,6 +361,48 @@ def test_unknown_token_id_raises(conn):
         pass
 
 
+def test_naive_as_of_rejected(conn):
+    """A naive as_of (no tzinfo) must be rejected up front — see store.py's
+    _require_aware: Postgres would otherwise interpret it in the session
+    timezone, silently shifting the `< as_of` PIT boundary (ADR-0009)."""
+    naive = datetime(2026, 7, 19, 12, 0, 0)   # no tzinfo
+
+    def expect_value_error(fn, *args):
+        try:
+            fn(conn, *args, naive)
+            raise AssertionError(f"{fn.__name__} should reject a naive as_of")
+        except ValueError:
+            pass
+
+    expect_value_error(store.candles_before, "no-such-token")
+    expect_value_error(store.forecasts_before, "KNYC", "tmax_f")
+    expect_value_error(store.observations_before, "KNYC", "tmax_f")
+
+
+def test_write_signal_unknown_run_raises(conn):
+    """With directional_signal.run_id FK'd to backtest_run(run_id), writing a
+    signal against a run that was never recorded via write_backtest_run must
+    raise, not silently insert a row with prob_fn_name = NULL."""
+    market = MarketRow(
+        venue="kalshi", external_id="KXSIG-BADRUN", question="unknown run fk check",
+        category="weather", outcomes=(OutcomeRef("KXSIG-BADRUN-YES", "YES", 0),))
+    market_id = store.upsert_market(conn, market)
+    store.upsert_outcomes(conn, market_id, market.outcomes)
+
+    signal = DirectionalSignal(
+        token_id="KXSIG-BADRUN-YES", venue="kalshi", category="weather",
+        p_model=0.6, price=0.5, size=100.0, ev_per_share=0.08,
+        expected_profit=8.0, kelly_size=120.0)
+    as_of = datetime(2026, 7, 19, tzinfo=timezone.utc)
+    try:
+        store.write_signal(conn, "no-such-run-id", signal, as_of)
+        raise AssertionError(
+            "write_signal against a nonexistent run_id should raise "
+            "(FK violation), not silently write NULL prob_fn_name")
+    except psycopg.IntegrityError:
+        pass
+
+
 # ---------------------------------------------------------------------------
 def main() -> int:
     dsn = _provision()
@@ -352,6 +425,8 @@ def main() -> int:
             test_pit_boundary_exact_as_of,
             test_signal_and_backtest_round_trip,
             test_unknown_token_id_raises,
+            test_naive_as_of_rejected,
+            test_write_signal_unknown_run_raises,
         ]
         for t in tests:
             try:

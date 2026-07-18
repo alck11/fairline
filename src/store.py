@@ -313,7 +313,21 @@ def write_backtest_result(conn: Connection, run_id: str, token_id: str,
 # point-in-time readers — `< as_of` enforced in SQL, never in Python
 # (ADR-0009's binding guarantee)
 # ---------------------------------------------------------------------------
+def _require_aware(as_of: datetime) -> None:
+    """A naive `as_of` (no tzinfo) would be interpreted by Postgres in the
+    session timezone, silently shifting the `< as_of` PIT boundary the
+    caller thinks they're getting — undermining ADR-0009's guarantee without
+    ever raising. Reject it here instead, at the one place every PIT reader
+    passes through."""
+    if as_of.tzinfo is None:
+        raise ValueError(
+            f"as_of must be timezone-aware, got naive datetime {as_of!r} — "
+            f"a naive value is interpreted in the DB session timezone, "
+            f"silently shifting the PIT boundary (ADR-0009)")
+
+
 def candles_before(conn: Connection, token_id: str, as_of: datetime) -> list[Candle]:
+    _require_aware(as_of)
     outcome_id = _resolve_outcome_id(conn, token_id)
     rows = conn.execute(
         """
@@ -332,6 +346,7 @@ def candles_before(conn: Connection, token_id: str, as_of: datetime) -> list[Can
 
 def forecasts_before(conn: Connection, station: str, variable: str,
                       as_of: datetime) -> list[WeatherForecastRow]:
+    _require_aware(as_of)
     rows = conn.execute(
         """
         SELECT issued_at, valid_at, value, source, horizon_h FROM weather_forecast
@@ -349,6 +364,7 @@ def forecasts_before(conn: Connection, station: str, variable: str,
 
 def observations_before(conn: Connection, station: str, variable: str,
                          as_of: datetime) -> list[WeatherObservationRow]:
+    _require_aware(as_of)
     rows = conn.execute(
         """
         SELECT observed_at, value, source FROM weather_observation

@@ -6,10 +6,10 @@
 -- (market_link, wallet, wallet_trade, wallet_score, arb_opportunity,
 -- execution) -- see ADR-0010 ("Reuse, don't reshape, the dimension tables").
 --
--- Seven tables: the five ADR-0010 tables --
+-- Seven tables: six physical ADR-0010 tables --
 --   candlestick, weather_forecast, weather_observation,
 --   directional_signal, backtest_run, backtest_result
--- -- plus two small additive helpers the ADR left implicit:
+-- -- plus one additive bridge (outcome_token) the ADR left implicit = seven:
 --
 --   * outcome_token  -- 001's `outcome` table (untouched, per ADR-0010's "no
 --     change to market/outcome/venue/trade_print") has no column for the
@@ -93,30 +93,10 @@ CREATE TABLE weather_observation (
 );
 
 -- ---------------------------------------------------------------------------
--- directional_signal -- the audit table ADR-0005 flagged as follow-up.
--- Persists each DirectionalSignal at decision time; distinct from
--- arb_opportunity (CONTEXT.md -> Signal (directional) -- never conflated)
--- (ADR-0010 #4).
--- ---------------------------------------------------------------------------
-CREATE TABLE directional_signal (
-    id                BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    run_id            TEXT NOT NULL,
-    as_of             TIMESTAMPTZ NOT NULL,
-    outcome_id        BIGINT NOT NULL REFERENCES outcome(outcome_id),
-    p_model           NUMERIC NOT NULL,
-    price             NUMERIC NOT NULL,
-    size              NUMERIC NOT NULL,
-    ev_per_share      NUMERIC NOT NULL,
-    expected_profit   NUMERIC NOT NULL,
-    prob_fn_name      TEXT,
-    UNIQUE (run_id, as_of, outcome_id)
-);
-CREATE INDEX ON directional_signal (outcome_id, as_of);
-
--- ---------------------------------------------------------------------------
 -- backtest_run / backtest_result -- the US-6 report and the always-market-
 -- price baseline read ONLY these, so the report reproduces from stored
--- tables with no re-ingest (ADR-0010 #5).
+-- tables with no re-ingest (ADR-0010 #5). Created ahead of directional_signal
+-- below because directional_signal.run_id references backtest_run(run_id).
 -- ---------------------------------------------------------------------------
 CREATE TABLE backtest_run (
     run_id        TEXT PRIMARY KEY,
@@ -143,3 +123,24 @@ CREATE TABLE backtest_result (
     UNIQUE (run_id, outcome_id, entry_as_of)
 );
 CREATE INDEX ON backtest_result (run_id);
+
+-- ---------------------------------------------------------------------------
+-- directional_signal -- the audit table ADR-0005 flagged as follow-up.
+-- Persists each DirectionalSignal at decision time; distinct from
+-- arb_opportunity (CONTEXT.md -> Signal (directional) -- never conflated)
+-- (ADR-0010 #4).
+-- ---------------------------------------------------------------------------
+CREATE TABLE directional_signal (
+    id                BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    run_id            TEXT NOT NULL REFERENCES backtest_run(run_id),
+    as_of             TIMESTAMPTZ NOT NULL,
+    outcome_id        BIGINT NOT NULL REFERENCES outcome(outcome_id),
+    p_model           NUMERIC NOT NULL,
+    price             NUMERIC NOT NULL,
+    size              NUMERIC NOT NULL,
+    ev_per_share      NUMERIC NOT NULL,
+    expected_profit   NUMERIC NOT NULL,
+    prob_fn_name      TEXT,
+    UNIQUE (run_id, as_of, outcome_id)
+);
+CREATE INDEX ON directional_signal (outcome_id, as_of);
