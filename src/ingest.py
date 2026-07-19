@@ -159,6 +159,64 @@ class FakeSource:
         return ["0xaaa", "0xbbb", "0xccc"]
 
 
+# ---------------------------------------------------------------------------
+# WP-3 additions (ADR-0006 update): market-DATA-only Protocol + the two new
+# row types it needs. Kalshi has no public per-trader feed, so its backend
+# cannot honestly implement wallet_trades/leaderboard — rather than stub
+# those out with fake data on the full MarketSource, we add a narrower
+# Protocol that drops them. list_markets/orderbook keep MarketSource's exact
+# shape (no divergence for the methods both interfaces share);
+# candlesticks/resolutions are new. This is purely additive: MarketSource,
+# its existing methods, and FakeSource above are unchanged.
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class Candle:
+    """One OHLC bar for an outcome's traded price (venue-agnostic — Kalshi
+    today). Field-for-field identical to store.py's own `Candle` (WP-1 defined
+    this exact shape anticipating WP-3, see store.py's row-types comment), so
+    a MarketDataSource backend's output passes straight into
+    `store.upsert_candles` / `store.candles_before` with no translation."""
+    ts: datetime
+    token_id: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float | None = None
+
+
+@dataclass(frozen=True)
+class ResolutionRow:
+    """One outcome's settlement. Field-for-field identical to store.py's own
+    `ResolutionRow`, so a MarketDataSource backend's output passes straight
+    into `store.apply_resolutions` with no translation. `resolved_at` is
+    informational only (store.py's PIT anchor for settlement stays
+    `market.resolves_at` — see apply_resolutions' docstring)."""
+    external_id: str          # market's external_id (ticker) — informational
+    outcome_token_id: str
+    resolved_value: float     # 1.0 / 0.0
+    resolved_at: datetime | None = None
+
+
+class MarketDataSource(Protocol):
+    """A backend that can answer fairline's venue-neutral market-DATA
+    questions — no wallet/trader discovery (Kalshi exposes no public
+    per-trader feed; see KalshiSource.wallet_trades in ingest_kalshi.py).
+    Data only: this Protocol must never grow a `place_order` (ADR-0006's
+    data-adapter/execution-adapter split — execution is a separate, future,
+    post-MVP adapter behind the Engine, ADR-0001)."""
+
+    def list_markets(self, *, active: bool = True, category: str | None = None,
+                     limit: int = 50) -> list[MarketRow]: ...
+
+    def orderbook(self, token_id: str) -> BookSnapshot: ...
+
+    def candlesticks(self, token_id: str, *, start: datetime, end: datetime,
+                     period: str = "1h") -> list[Candle]: ...
+
+    def resolutions(self, external_ids: Sequence[str]) -> list[ResolutionRow]: ...
+
+
 if __name__ == "__main__":
     src: MarketSource = FakeSource()
     for m in src.list_markets(category="weather"):

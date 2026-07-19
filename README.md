@@ -27,8 +27,10 @@ Domain language lives in [CONTEXT.md](CONTEXT.md); decisions in
 | `schema/001_schema.sql` | Storage | TimescaleDB schema: markets, outcomes, cross-venue links, orderbook + trade hypertables, wallet trades, point-in-time wallet scores, opportunity + execution audit. |
 | `schema/002_kalshi_ev.sql` | Storage | Additive migration (WP-1, ADR-0010): candlestick (hypertable), weather_forecast, weather_observation, directional_signal, backtest_run, backtest_result, plus the `outcome_token` bridge `store.py` needs to address outcomes by venue-native token/ticker id. Does not touch `001` or any parked table. |
 | `src/store.py` | Storage (persistence layer) | Thin layer over `001`+`002`: connection from env, idempotent upserts, and the point-in-time (`< as_of`, enforced in SQL) read helpers `prob_fn` implementations consume (ADR-0009, WP-1). No business logic, no network calls. |
-| `src/ingest.py` | Ingestion (interface) | `MarketSource` Protocol — how markets, orderbooks, price history, wallet trades and leaderboard discovery enter the stack. Backend-agnostic (ADR-0006). |
+| `src/ingest.py` | Ingestion (interface) | `MarketSource` Protocol — how markets, orderbooks, price history, wallet trades and leaderboard discovery enter the stack. Backend-agnostic (ADR-0006). Also carries the narrower `MarketDataSource` Protocol (`list_markets`/`orderbook`/`candlesticks`/`resolutions`, no wallet methods) plus the `Candle`/`ResolutionRow` row types (WP-3). |
 | `src/ingest_polymarket_cli.py` | Ingestion (backend) · PARKED | First `MarketSource` impl: shells out to the official [polymarket-cli](https://github.com/Polymarket/polymarket-cli) (`-o json`, no-auth public data). Install the Rust binary and put `polymarket` on PATH (or set `$POLYMARKET_CLI`). |
+| `src/ingest_kalshi.py` | Ingestion (backend) · MVP data adapter | `KalshiSource`: `MarketDataSource` over Kalshi's **public** trade-api v2 (weather + econ, no auth, free — ADR-0006, WP-3). `wallet_trades`/`leaderboard` raise `NotImplementedError` (Kalshi has no public per-trader feed). Data only — no order placement. |
+| `src/run_kalshi_ingest.py` | Ingestion (entry point) | CLI that pulls Kalshi weather/econ markets + candles + resolutions via `KalshiSource` into the store (`store.py`, WP-1/WP-3). See "Kalshi ingestion" below. |
 | `src/ev_detector.py` | Directional (MVP-primary) | Model-vs-price EV betting: post-fee EV/share, depth-aware sizing, quarter-Kelly cap. Probability supplied via the `prob_fn(market, as_of)` contract (ADR-0009). Paper-first (ADR-0001, ADR-0005). |
 | `src/fees.py` | Fee math | Polymarket V2 taker formula `rate·p·(1−p)` (maker-free) + Kalshi per-order rounded fee. The single source of truth every other module imports. |
 | `src/detector.py` | Detection · PARKED | Fee-aware edge for complete-set / cross-venue arb, plus depth-aware sizing that walks the book to find the profit-*maximizing* size after slippage. |
@@ -87,6 +89,54 @@ correctness check it makes — round-trip, idempotency, PIT boundaries — is
 plain SQL and unaffected by whether the tables are hypertables). If neither
 `$DATABASE_URL` nor `pgserver` is available, the test prints why and exits 0
 (skipped, not failed) rather than pretending to pass.
+
+## Kalshi ingestion (WP-3)
+
+`src/ingest_kalshi.py`'s `KalshiSource` reads Kalshi's **public** trade-api v2
+(`https://external-api.kalshi.com/trade-api/v2` by default) — no API key, no
+auth headers, free. Endpoints used: `GET /events?with_nested_markets=true`
+(markets, filtered client-side to `category` in `{'Climate and Weather',
+'Economics'}` — Kalshi's `category` query param is not actually applied
+server-side, confirmed live), `GET /markets/{ticker}/orderbook`,
+`GET /series/{series_ticker}/markets/{ticker}/candlesticks`, and
+`GET /markets?tickers=...` (resolutions, via `status`/`result`). It implements
+`ingest.py`'s `MarketDataSource` Protocol, not the full `MarketSource`:
+`wallet_trades`/`leaderboard` raise `NotImplementedError("Kalshi exposes no
+public per-trader feed")`, since Kalshi has no public per-trader feed to back
+them (ADR-0006).
+
+Token ids: Kalshi has no separate per-side id like Polymarket's CLOB tokens —
+`KalshiSource` synthesizes `"<ticker>-YES"` / `"<ticker>-NO"` (matching the
+convention `store.py`'s own demo/tests already use). NO-side candles/orderbook
+levels are derived as the complement of the YES side (Kalshi's yes+no≈1
+pricing), documented inline in `ingest_kalshi.py`.
+
+Run the demo (network required, no database, no auth) to see it against live
+data:
+```
+.venv/bin/python src/ingest_kalshi.py
+```
+
+Run the real ingest — pulls markets, candles, and resolutions into the store
+(needs `$DATABASE_URL` provisioned per "Database setup" above, plus network):
+```
+.venv/bin/python src/run_kalshi_ingest.py --category weather --days 14
+.venv/bin/python src/run_kalshi_ingest.py --category economics --limit 20 --period 1h
+```
+`--category` (`weather`|`economics`, default both), `--limit` (max markets,
+default 50), `--days` (trailing candle history window, default 7), `--period`
+(`1m`|`1h`|`1d`, default `1h`). On an API or rate-limit failure it prints a
+clear message to stderr and exits non-zero (`KalshiAPIError`) rather than
+partially ingesting or crashing on a bare traceback — every HTTP call retries
+transient (429/5xx) failures with backoff first.
+
+**Tests are fixture-based, no live network:**
+`tests/test_ingest_kalshi.py` monkeypatches `urllib.request.urlopen` to
+replay real Kalshi responses recorded under `tests/fixtures/kalshi/`
+(captured live 2026-07-18) — no network call happens when running the suite:
+```
+.venv/bin/python tests/test_ingest_kalshi.py
+```
 
 ## Suggested build order (MVP — see [plan.md](docs/architecture/plan.md))
 
