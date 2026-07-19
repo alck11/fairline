@@ -29,6 +29,7 @@ import io
 import json
 import os
 import sys
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -986,6 +987,107 @@ def test_run_kalshi_ingest_calls_apply_resolutions_with_real_data():
 
 
 # ---------------------------------------------------------------------------
+# list_markets pagination bound (QA round 4) -- non-advancing cursor / page cap
+# ---------------------------------------------------------------------------
+def _never_matching_router(path, query):
+    """Every /events page: one non-empty event that never matches the
+    requested category (weather/economics), plus a cursor that never
+    advances -- stands in for either "the matching results are very far
+    into a very long result set" or a server-side cursor bug. Before the
+    round-4 fix, nothing in list_markets()'s loop bounded how long this
+    could run: `len(rows) < limit` never went false (nothing ever matches)
+    and `not cursor or not events` never fired (both stay truthy on every
+    page)."""
+    if path == "/events":
+        return {"events": [{"category": "Sports", "series_ticker": "X",
+                            "markets": [{"ticker": "T",
+                                        "close_time": "2026-07-20T04:59:00Z"}]}],
+                "cursor": "same-cursor-forever"}
+    raise AssertionError(f"unmocked Kalshi path in test fixture router: {path}")
+
+
+def test_list_markets_pagination_terminates_on_non_advancing_cursor():
+    """QA round 4 (decisive, live-reproduced blocker): with a category filter
+    that never matches and a cursor that never advances, list_markets()'s
+    pagination loop used to spin forever. This is not an exception, so it
+    escaped run_kalshi_ingest.main()'s except-Exception backstop (commit
+    7186963) entirely -- no stderr, no exit code, no return, ever. Runs the
+    call on a background thread with a generous 8s timeout (vs. the hundreds
+    of thousands of iterations a real hang would spin through) so a
+    regression here is reported as a test failure instead of hanging the
+    whole suite; asserts the thread actually finished *and* that it finished
+    via KalshiAPIError naming the stuck cursor -- not just "didn't hang"."""
+    calls, restore = install_fixture_router(_never_matching_router)
+    try:
+        src = KalshiSource()
+        result = {}
+
+        def work():
+            try:
+                result["rows"] = src.list_markets(category="weather", limit=10)
+            except Exception as e:
+                result["exc"] = e
+
+        t = threading.Thread(target=work, daemon=True)
+        t.start()
+        t.join(timeout=8)
+        check(not t.is_alive(),
+              "list_markets() did not return within 8s of a non-empty, "
+              "non-matching, cursor-never-advances page stream -- the "
+              "pagination loop is unbounded again")
+        check("exc" in result, f"expected KalshiAPIError, got result={result}")
+        check(isinstance(result["exc"], KalshiAPIError),
+              f"expected KalshiAPIError specifically, got "
+              f"{type(result.get('exc'))}: {result.get('exc')}")
+        check("cursor" in str(result["exc"]).lower(),
+              f"error should explain the non-advancing cursor, got: "
+              f"{result['exc']}")
+    finally:
+        restore()
+
+
+def test_run_kalshi_ingest_main_terminates_on_pagination_hang():
+    """Same failure, driven through the real CLI entry point
+    (run_kalshi_ingest.main()) with store.connect() stubbed so no real DB is
+    needed -- confirms the fix is reachable through the documented entry
+    point, not just the isolated adapter method (QA round 4)."""
+
+    class _DummyConn:
+        def execute(self, *a, **kw):
+            return None
+
+        def close(self):
+            pass
+
+    calls, restore = install_fixture_router(_never_matching_router)
+    orig_connect = store.connect
+    store.connect = lambda: _DummyConn()
+    try:
+        result = {}
+
+        def work():
+            try:
+                result["rc"] = run_kalshi_ingest.main(
+                    ["--category", "weather", "--limit", "10"])
+            except BaseException as e:
+                result["exc"] = e
+
+        t = threading.Thread(target=work, daemon=True)
+        t.start()
+        t.join(timeout=8)
+        check(not t.is_alive(),
+              "run_kalshi_ingest.main() did not return within 8s -- confirms "
+              "the pagination hang is reachable through the documented CLI "
+              "entry point itself, not just the isolated adapter method")
+        check(result.get("rc") == 1,
+              f"main() should exit 1 on the pagination KalshiAPIError, "
+              f"got {result}")
+    finally:
+        restore()
+        store.connect = orig_connect
+
+
+# ---------------------------------------------------------------------------
 def main() -> int:
     tests = [
         test_list_markets_category_weather,
@@ -1020,6 +1122,8 @@ def main() -> int:
         test_run_kalshi_ingest_main_returns_nonzero_on_api_failure,
         test_run_kalshi_ingest_main_returns_nonzero_on_unexpected_error,
         test_run_kalshi_ingest_calls_apply_resolutions_with_real_data,
+        test_list_markets_pagination_terminates_on_non_advancing_cursor,
+        test_run_kalshi_ingest_main_terminates_on_pagination_hang,
     ]
     failures = 0
     for t in tests:

@@ -271,9 +271,33 @@ class KalshiSource:
         status = "open" if active else "settled"
         rows: list[MarketRow] = []
         cursor = None
+        seen_cursors: set[str] = set()
+        page_size = min(200, limit) or 1
+        # Hard cap on round trips (QA round 4): `len(rows) < limit` and
+        # `not cursor or not events` are the loop's only exit conditions, so
+        # a page that keeps returning non-empty `events` with none matching
+        # the requested category (a legitimate large result set where the
+        # filter matches only a small fraction of it, e.g. --category
+        # economics against a feed dominated by other categories) never
+        # trips either one and the loop never returns rows[:limit] on its
+        # own. This bound is generous for any real Kalshi catalog (up to
+        # MAX_PAGES * 200 events scanned) but always finite -- when hit, fail
+        # loud with KalshiAPIError instead of hanging or silently returning
+        # a partial/wrong result.
+        MAX_PAGES = max(50, 20 * -(-limit // page_size))
+        pages_fetched = 0
         while len(rows) < limit:
+            pages_fetched += 1
+            if pages_fetched > MAX_PAGES:
+                raise KalshiAPIError(
+                    f"Kalshi API pagination exceeded {MAX_PAGES} page(s) "
+                    f"fetching GET /events (status={status!r}, "
+                    f"category={category!r}): fetched {pages_fetched - 1} "
+                    f"page(s) totalling {len(rows)} matching row(s) without "
+                    f"reaching limit={limit} -- aborting rather than "
+                    f"continuing indefinitely")
             page = self._get("/events", with_nested_markets="true", status=status,
-                             limit=min(200, limit), cursor=cursor)
+                             limit=page_size, cursor=cursor)
             # _get() guarantees `page` itself is a dict; this try/except
             # covers a dict missing an expected key or nesting a non-dict
             # where a market/event object is expected -- valid JSON, wrong
@@ -295,14 +319,27 @@ class KalshiSource:
                             break
                     if len(rows) >= limit:
                         break
-                cursor = page.get("cursor")
+                next_cursor = page.get("cursor")
             except (KeyError, TypeError, AttributeError, ValueError) as e:
                 raise KalshiAPIError(
                     f"Kalshi API returned an unexpected response shape from "
                     f"GET /events (status={status!r}): "
                     f"{type(e).__name__}: {e}") from e
-            if not cursor or not events:
+            if not next_cursor or not events:
                 break
+            # QA round 4's decisive repro: a non-empty `events` page paired
+            # with a cursor that repeats a value already seen (most often
+            # simply unchanged from the prior iteration) is a definitive
+            # stuck-pagination signal -- don't wait for MAX_PAGES, fail now.
+            if next_cursor == cursor or next_cursor in seen_cursors:
+                raise KalshiAPIError(
+                    f"Kalshi API returned a non-advancing cursor "
+                    f"{next_cursor!r} from GET /events (status={status!r}, "
+                    f"category={category!r}) after {pages_fetched} page(s) "
+                    f"and {len(rows)} row(s) -- pagination cannot make "
+                    f"progress")
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
         return rows[:limit]
 
     def orderbook(self, token_id: str) -> BookSnapshot:
