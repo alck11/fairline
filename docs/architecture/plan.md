@@ -99,8 +99,12 @@ repo convention (`python3 tests/<file>.py`, no pytest dependency).
    entry-point/script that pulls weather+econ markets, candles, trades, resolutions
    into the store (via WP-1). README ingestion section.
 3. **Inputs.** `src/ingest.py` (existing Protocol/row types); `store.py` upserts
-   (WP-1); Kalshi public REST/WS API (no trading auth); `fees.py` (Kalshi coefficient,
-   already present) for `market.fee_rate`.
+   (WP-1); Kalshi public REST/WS API (no trading auth). Do **not** populate
+   `market.fee_rate` (schema/001): Kalshi fees are computed at call time by
+   `fees.kalshi_fee` from a coefficient, never from a stored per-market rate, and
+   no MVP code reads the column — it is a pre-pivot artifact, leave it NULL
+   (architect ruling 2026-07-18). The only live fee lever is the `index_market`
+   flag; see the fee note under WP-4.
 4. **Outputs / signatures.**
    - `ingest.py`: `MarketDataSource` Protocol (`list_markets`, `orderbook`,
      `candlesticks(token_id, *, start, end, period='1h') -> list[Candle]`,
@@ -151,6 +155,20 @@ repo convention (`python3 tests/<file>.py`, no pytest dependency).
    `Engine` gate/kill-switch/`execute_arb`/`execute_copy` logic (only *add*
    `execute_signal`). Do **not** implement live execution. Do **not** build the
    report or the leakage audit (WP-5).
+
+> **Fee note (architect ruling 2026-07-18).** The Kalshi fee path
+> (`ev_detector.ev_per_share` -> `fees.Leg` -> `fees.kalshi_fee`) has **no seam**
+> for the reduced-coefficient `index_market` flag: `find_signal`/`ev_per_share`
+> construct `Leg(venue, size, price, category)` without it, so every Kalshi fee
+> uses `KALSHI_COEF_DEFAULT` (0.07). For the MVP this is **accepted as-is** — 0.07
+> is the higher coefficient, so it *understates* edge, the safe direction for a
+> GO/NO-GO backtest (you cannot false-positive into trading on overstated fees).
+> WP-4 must therefore **not** try to source or pass `index_market` (that would
+> require editing `ev_detector.py`/`fees.py`, forbidden by this WP's boundary).
+> **Open item:** if a later target market is Kalshi index-classified and the
+> pessimism matters, the fix is an additive `index_market` param threaded
+> `find_signal -> ev_per_share -> Leg` — a separate, future `ev_detector` change,
+> out of MVP scope.
 
 ---
 
