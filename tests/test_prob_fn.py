@@ -319,10 +319,15 @@ def _try_store_round_trip() -> tuple[bool, str]:
 
 
 def test_store_reader_round_trip():
+    """Returns the sentinel "skipped" (instead of a bare `return`) when no
+    Postgres is reachable, so the runner can count it separately from a pass
+    — this is the one test that proves MidpriceProbFn honors the `< as_of`
+    boundary through the real SQL path in store.py, so its absence must show
+    up in the summary, not disappear into an unqualified "ALL PASSED"."""
     ran, msg = _try_store_round_trip()
     if not ran:
         print(f"  (SKIPPED — {msg})")
-        return
+        return "skipped"
     # _try_store_round_trip raises AssertionError itself on mismatch; if we
     # got here with ran=True it already passed its internal check().
 
@@ -340,10 +345,15 @@ def main() -> int:
         test_store_reader_round_trip,
     ]
     failures = 0
+    skipped = 0
     for t in tests:
         try:
-            t()
-            print(f"PASS: {t.__name__}")
+            result = t()
+            if result == "skipped":
+                skipped += 1
+                print(f"SKIP: {t.__name__}")
+            else:
+                print(f"PASS: {t.__name__}")
         except AssertionError as e:
             failures += 1
             print(f"FAIL: {t.__name__}: {e}")
@@ -351,10 +361,14 @@ def main() -> int:
             failures += 1
             print(f"ERROR: {t.__name__}: {type(e).__name__}: {e}")
 
+    passed = len(tests) - failures - skipped
     if failures:
-        print(f"\n{failures} test(s) failed")
+        print(f"\n{passed} passed, {skipped} skipped, {failures} failed")
         return 1
-    print("\nALL PASSED")
+    if skipped:
+        print(f"\n{passed} passed, {skipped} skipped (no Postgres reachable)")
+    else:
+        print(f"\n{passed} passed, 0 skipped — ALL PASSED")
     return 0
 
 
