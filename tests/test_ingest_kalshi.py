@@ -471,6 +471,136 @@ def test_graceful_degradation_on_429():
     check(attempts["n"] == 2, f"429 should be retried, got {attempts['n']} attempt(s)")
 
 
+def test_series_ticker_missing_key_raises_kalshi_api_error():
+    """QA WP-3 follow-up repro: a syntactically valid response missing the
+    expected 'market' key used to bypass _get()'s error wrapping entirely
+    and raise a bare KeyError."""
+    def router(path, query):
+        return {"weird": "shape"}  # no "market" key
+
+    calls, restore = install_fixture_router(router)
+    try:
+        src = KalshiSource(max_retries=2)
+        try:
+            src._series_ticker("SOME-TICKER")
+            raise AssertionError("missing 'market' key should raise KalshiAPIError")
+        except KalshiAPIError as e:
+            check("market" in str(e) and "SOME-TICKER" in str(e),
+                  f"error message should name the missing field and ticker: {e}")
+    finally:
+        restore()
+
+
+def test_resolutions_missing_ticker_key_raises_kalshi_api_error():
+    """QA WP-3 follow-up repro: a market dict in the /markets response
+    missing 'ticker' used to raise a bare KeyError from resolutions()."""
+    def router(path, query):
+        return {"markets": [{"status": "finalized", "result": "yes",
+                             "close_time": "2026-07-18T04:59:00Z"}]}  # no "ticker"
+
+    calls, restore = install_fixture_router(router)
+    try:
+        src = KalshiSource(max_retries=2)
+        try:
+            src.resolutions(["FOO-TICKER"])
+            raise AssertionError("missing 'ticker' key should raise KalshiAPIError")
+        except KalshiAPIError as e:
+            check("ticker" in str(e).lower(), f"error message should name the field: {e}")
+    finally:
+        restore()
+
+
+def test_malformed_top_level_body_raises_kalshi_api_error():
+    """QA WP-3 follow-up repro: a top-level JSON body that isn't a dict
+    (null / bare list / string) used to bypass _get()'s error wrapping and
+    surface as a bare AttributeError deep in a parsing site. Covers every
+    _get() caller by exercising list_markets, orderbook, and candlesticks
+    (via the series_ticker lookup) against each malformed shape."""
+    malformed_bodies = [None, [1, 2, 3], "not an object"]
+
+    for body in malformed_bodies:
+        def router(path, query, body=body):
+            return body
+
+        calls, restore = install_fixture_router(router)
+        try:
+            src = KalshiSource(max_retries=2)
+            try:
+                src.list_markets(category="weather", limit=3)
+                raise AssertionError(
+                    f"list_markets should raise KalshiAPIError for top-level body {body!r}")
+            except KalshiAPIError as e:
+                check("JSON object" in str(e),
+                      f"error message should describe the shape problem: {e}")
+        finally:
+            restore()
+
+    for body in malformed_bodies:
+        def router(path, query, body=body):
+            return body
+
+        calls, restore = install_fixture_router(router)
+        try:
+            src = KalshiSource(max_retries=2)
+            try:
+                src.orderbook("SOME-TICKER-YES")
+                raise AssertionError(
+                    f"orderbook should raise KalshiAPIError for top-level body {body!r}")
+            except KalshiAPIError as e:
+                check("JSON object" in str(e),
+                      f"error message should describe the shape problem: {e}")
+        finally:
+            restore()
+
+    for body in malformed_bodies:
+        def router(path, query, body=body):
+            return body
+
+        calls, restore = install_fixture_router(router)
+        try:
+            src = KalshiSource(max_retries=2)
+            try:
+                src.resolutions(["SOME-TICKER"])
+                raise AssertionError(
+                    f"resolutions should raise KalshiAPIError for top-level body {body!r}")
+            except KalshiAPIError as e:
+                check("JSON object" in str(e),
+                      f"error message should describe the shape problem: {e}")
+        finally:
+            restore()
+
+
+def test_candlesticks_missing_key_raises_kalshi_api_error():
+    """A candlestick entry missing 'end_period_ts' (or any other malformed
+    field this parsing relies on) should raise KalshiAPIError, not a bare
+    KeyError -- same class of bug as the series_ticker/resolutions repros,
+    caught here for the third parsing site the QA report flagged
+    (candlesticks/any other _get() caller) during the executor's audit."""
+    def router(path, query):
+        if path == "/markets/KXHIGHNY-26JUL19-T80":
+            return _load("market_single.json")
+        if path == "/events/KXHIGHNY-26JUL19":
+            return _load("event_single.json")
+        if path.startswith("/series/") and path.endswith("/candlesticks"):
+            return {"candlesticks": [{"price": {"open_dollars": "0.5", "high_dollars": "0.6",
+                                                 "low_dollars": "0.4", "close_dollars": "0.5"},
+                                       "volume_fp": "10"}]}  # no "end_period_ts"
+        raise AssertionError(f"unmocked path: {path}")
+
+    calls, restore = install_fixture_router(router)
+    try:
+        src = KalshiSource(max_retries=2)
+        start = datetime(2026, 7, 17, tzinfo=timezone.utc)
+        end = datetime(2026, 7, 19, tzinfo=timezone.utc)
+        try:
+            src.candlesticks("KXHIGHNY-26JUL19-T80-YES", start=start, end=end, period="1h")
+            raise AssertionError("missing 'end_period_ts' should raise KalshiAPIError")
+        except KalshiAPIError as e:
+            check("KXHIGHNY-26JUL19-T80" in str(e), f"error message should name the ticker: {e}")
+    finally:
+        restore()
+
+
 def test_run_kalshi_ingest_main_returns_nonzero_on_api_failure():
     """run_kalshi_ingest.main() is the documented entry point (US-2: "exits
     non-zero with a clear error on API/rate-limit failure"). Stub store.connect
@@ -591,6 +721,10 @@ def main() -> int:
         test_leaderboard_raises,
         test_graceful_degradation_on_repeated_5xx,
         test_graceful_degradation_on_429,
+        test_series_ticker_missing_key_raises_kalshi_api_error,
+        test_resolutions_missing_ticker_key_raises_kalshi_api_error,
+        test_malformed_top_level_body_raises_kalshi_api_error,
+        test_candlesticks_missing_key_raises_kalshi_api_error,
         test_run_kalshi_ingest_main_returns_nonzero_on_api_failure,
         test_run_kalshi_ingest_calls_apply_resolutions_with_real_data,
     ]

@@ -132,7 +132,21 @@ class KalshiSource:
             req = urllib.request.Request(url, headers={"Accept": "application/json"})
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    return json.loads(resp.read())
+                    body = json.loads(resp.read())
+                if not isinstance(body, dict):
+                    # valid JSON, wrong shape -- every endpoint this module
+                    # calls documents a top-level object; a bare list/string/
+                    # null bypasses every caller's dict access entirely and
+                    # would otherwise surface as an uncaught TypeError deep
+                    # in a parsing site instead of this module's documented
+                    # graceful-degradation contract (ADR-0006/US-2). Not
+                    # retryable -- a permanently wrong shape won't fix itself
+                    # -- so raise immediately rather than looping.
+                    raise KalshiAPIError(
+                        f"Kalshi API returned a non-object JSON response for "
+                        f"{url}: expected a JSON object at the top level, "
+                        f"got {type(body).__name__}")
+                return body
             except urllib.error.HTTPError as e:
                 last_err = e
                 if e.code == 429 or e.code >= 500:
@@ -182,10 +196,20 @@ class KalshiSource:
     def _series_ticker(self, ticker: str) -> str:
         if ticker in self._series_cache:
             return self._series_cache[ticker]
-        market = self._get(f"/markets/{urllib.parse.quote(ticker, safe='')}")["market"]
-        event_ticker = market["event_ticker"]
-        event = self._get(f"/events/{urllib.parse.quote(event_ticker, safe='')}")["event"]
-        series_ticker = event["series_ticker"]
+        # _get() already guarantees a top-level dict (see _get's own shape
+        # check); this try/except covers the next layer down -- a dict
+        # missing an expected key ("market"/"event_ticker"/"event"/
+        # "series_ticker"), which is valid JSON but still not the shape this
+        # module's parsing assumes (QA WP-3 follow-up).
+        try:
+            market = self._get(f"/markets/{urllib.parse.quote(ticker, safe='')}")["market"]
+            event_ticker = market["event_ticker"]
+            event = self._get(f"/events/{urllib.parse.quote(event_ticker, safe='')}")["event"]
+            series_ticker = event["series_ticker"]
+        except (KeyError, TypeError) as e:
+            raise KalshiAPIError(
+                f"Kalshi API returned an unexpected response shape resolving "
+                f"series_ticker for {ticker!r}: {type(e).__name__}: {e}") from e
         self._series_cache[ticker] = series_ticker
         return series_ticker
 
@@ -237,32 +261,52 @@ class KalshiSource:
         while len(rows) < limit:
             page = self._get("/events", with_nested_markets="true", status=status,
                              limit=min(200, limit), cursor=cursor)
-            events = page.get("events") or []
-            for ev in events:
-                if ev.get("category") not in wanted_kalshi:
-                    continue
-                fair_category = next(k for k, v in CATEGORY_MAP.items()
-                                     if v == ev["category"])
-                for m in ev.get("markets") or []:
-                    rows.append(self._parse_market(m, fair_category))
-                    self._series_cache[m["ticker"]] = ev["series_ticker"]
+            # _get() guarantees `page` itself is a dict; this try/except
+            # covers a dict missing an expected key or nesting a non-dict
+            # where a market/event object is expected -- valid JSON, wrong
+            # shape (QA WP-3 follow-up).
+            try:
+                events = page.get("events") or []
+                for ev in events:
+                    if ev.get("category") not in wanted_kalshi:
+                        continue
+                    fair_category = next(k for k, v in CATEGORY_MAP.items()
+                                         if v == ev["category"])
+                    for m in ev.get("markets") or []:
+                        row = self._parse_market(m, fair_category)
+                        rows.append(row)
+                        self._series_cache[row.external_id] = ev["series_ticker"]
+                        if len(rows) >= limit:
+                            break
                     if len(rows) >= limit:
                         break
-                if len(rows) >= limit:
-                    break
-            cursor = page.get("cursor")
+                cursor = page.get("cursor")
+            except (KeyError, TypeError, AttributeError) as e:
+                raise KalshiAPIError(
+                    f"Kalshi API returned an unexpected response shape from "
+                    f"GET /events (status={status!r}): "
+                    f"{type(e).__name__}: {e}") from e
             if not cursor or not events:
                 break
         return rows[:limit]
 
     def orderbook(self, token_id: str) -> BookSnapshot:
         ticker, side = self._split_token(token_id)
-        data = self._get(
-            f"/markets/{urllib.parse.quote(ticker, safe='')}/orderbook")["orderbook_fp"]
-        yes_levels = [(self._dollars(p), float(sz))
-                      for p, sz in (data.get("yes_dollars") or [])]
-        no_levels = [(self._dollars(p), float(sz))
-                     for p, sz in (data.get("no_dollars") or [])]
+        resp = self._get(f"/markets/{urllib.parse.quote(ticker, safe='')}/orderbook")
+        # _get() guarantees `resp` is a dict; this try/except covers a
+        # missing "orderbook_fp" key, a non-dict value in its place, or
+        # price/size levels that aren't the [price, size] pairs this parsing
+        # assumes -- valid JSON, wrong shape (QA WP-3 follow-up).
+        try:
+            data = resp["orderbook_fp"]
+            yes_levels = [(self._dollars(p), float(sz))
+                          for p, sz in (data.get("yes_dollars") or [])]
+            no_levels = [(self._dollars(p), float(sz))
+                         for p, sz in (data.get("no_dollars") or [])]
+        except (KeyError, TypeError, ValueError, AttributeError) as e:
+            raise KalshiAPIError(
+                f"Kalshi API returned an unexpected orderbook shape for "
+                f"{ticker!r}: {type(e).__name__}: {e}") from e
         # a resting bid for the OTHER side at price q is equivalent to a
         # resting ask for THIS side at price (1 - q) — Kalshi's YES/NO
         # complementary pricing (the orderbook endpoint's own documented
@@ -301,41 +345,51 @@ class KalshiSource:
             period_interval=PERIOD_MINUTES[period],
         )
         candles = []
-        for c in data.get("candlesticks") or []:
-            price = c.get("price") or {}
-            o, h, l, cl = (self._dollars(price.get("open_dollars")),
-                          self._dollars(price.get("high_dollars")),
-                          self._dollars(price.get("low_dollars")),
-                          self._dollars(price.get("close_dollars")))
-            if None in (o, h, l, cl):
-                # no trades in this bar (Kalshi's `price` fields are null
-                # when nothing traded) -- fall back to the yes bid/ask
-                # midpoint so a quiet bar doesn't just vanish from the series.
-                # KNOWN GAP (WP-3 review, deferred): if only one side of
-                # yes_bid/yes_ask is present, `mid()` below treats the
-                # missing side as 0 rather than a true one-sided mid (e.g. a
-                # bid-only book would understate the mid by half the true
-                # price) -- more involved to fix correctly and lower value
-                # for the MVP than the other review items; left as-is.
-                yb, ya = c.get("yes_bid") or {}, c.get("yes_ask") or {}
-                mid = lambda k: (
-                    (self._dollars(yb.get(k)) or 0) + (self._dollars(ya.get(k)) or 0)
-                ) / 2.0
-                o = o if o is not None else mid("open_dollars")
-                h = h if h is not None else mid("high_dollars")
-                l = l if l is not None else mid("low_dollars")
-                cl = cl if cl is not None else mid("close_dollars")
-            volume = self._dollars(c.get("volume_fp"))
-            ts = datetime.fromtimestamp(c["end_period_ts"], tz=timezone.utc)
-            if side == "yes":
-                candles.append(Candle(ts, token_id, o, h, l, cl, volume))
-            else:
-                # NO is the complement of YES (Kalshi's yes+no == 1 pricing;
-                # see module docstring / orderbook()); high/low invert.
-                candles.append(Candle(
-                    ts, token_id,
-                    open=1.0 - o, high=1.0 - l, low=1.0 - h, close=1.0 - cl,
-                    volume=volume))
+        # _get() guarantees `data` is a dict; this try/except covers a
+        # candlestick entry missing an expected key (e.g. "end_period_ts")
+        # or carrying a value this parsing can't work with (e.g. a numeric
+        # field that isn't a number) -- valid JSON, wrong shape (QA WP-3
+        # follow-up).
+        try:
+            for c in data.get("candlesticks") or []:
+                price = c.get("price") or {}
+                o, h, l, cl = (self._dollars(price.get("open_dollars")),
+                              self._dollars(price.get("high_dollars")),
+                              self._dollars(price.get("low_dollars")),
+                              self._dollars(price.get("close_dollars")))
+                if None in (o, h, l, cl):
+                    # no trades in this bar (Kalshi's `price` fields are null
+                    # when nothing traded) -- fall back to the yes bid/ask
+                    # midpoint so a quiet bar doesn't just vanish from the series.
+                    # KNOWN GAP (WP-3 review, deferred): if only one side of
+                    # yes_bid/yes_ask is present, `mid()` below treats the
+                    # missing side as 0 rather than a true one-sided mid (e.g. a
+                    # bid-only book would understate the mid by half the true
+                    # price) -- more involved to fix correctly and lower value
+                    # for the MVP than the other review items; left as-is.
+                    yb, ya = c.get("yes_bid") or {}, c.get("yes_ask") or {}
+                    mid = lambda k: (
+                        (self._dollars(yb.get(k)) or 0) + (self._dollars(ya.get(k)) or 0)
+                    ) / 2.0
+                    o = o if o is not None else mid("open_dollars")
+                    h = h if h is not None else mid("high_dollars")
+                    l = l if l is not None else mid("low_dollars")
+                    cl = cl if cl is not None else mid("close_dollars")
+                volume = self._dollars(c.get("volume_fp"))
+                ts = datetime.fromtimestamp(c["end_period_ts"], tz=timezone.utc)
+                if side == "yes":
+                    candles.append(Candle(ts, token_id, o, h, l, cl, volume))
+                else:
+                    # NO is the complement of YES (Kalshi's yes+no == 1 pricing;
+                    # see module docstring / orderbook()); high/low invert.
+                    candles.append(Candle(
+                        ts, token_id,
+                        open=1.0 - o, high=1.0 - l, low=1.0 - h, close=1.0 - cl,
+                        volume=volume))
+        except (KeyError, TypeError, ValueError, AttributeError) as e:
+            raise KalshiAPIError(
+                f"Kalshi API returned an unexpected candlestick shape for "
+                f"{ticker!r}: {type(e).__name__}: {e}") from e
         return candles
 
     def resolutions(self, external_ids: Sequence[str]) -> list[ResolutionRow]:
@@ -350,17 +404,27 @@ class KalshiSource:
             chunk = ids[i:i + chunk_size]
             data = self._get("/markets", tickers=",".join(chunk),
                              limit=len(chunk))
-            for m in data.get("markets") or []:
-                if m.get("status") not in RESOLVED_STATUSES:
-                    continue
-                result = m.get("result")
-                if result not in ("yes", "no"):
-                    continue
-                ticker = m["ticker"]
-                resolved_at = self._ts(m.get("close_time"))
-                yes_value = 1.0 if result == "yes" else 0.0
-                rows.append(ResolutionRow(ticker, f"{ticker}-YES", yes_value, resolved_at))
-                rows.append(ResolutionRow(ticker, f"{ticker}-NO", 1.0 - yes_value, resolved_at))
+            # _get() guarantees `data` is a dict; this try/except covers a
+            # market entry missing an expected key (e.g. "ticker") -- valid
+            # JSON, wrong shape (QA WP-3 follow-up: the exact repro was a
+            # resolved market missing "ticker").
+            try:
+                for m in data.get("markets") or []:
+                    if m.get("status") not in RESOLVED_STATUSES:
+                        continue
+                    result = m.get("result")
+                    if result not in ("yes", "no"):
+                        continue
+                    ticker = m["ticker"]
+                    resolved_at = self._ts(m.get("close_time"))
+                    yes_value = 1.0 if result == "yes" else 0.0
+                    rows.append(ResolutionRow(ticker, f"{ticker}-YES", yes_value, resolved_at))
+                    rows.append(ResolutionRow(ticker, f"{ticker}-NO", 1.0 - yes_value, resolved_at))
+            except (KeyError, TypeError, AttributeError) as e:
+                raise KalshiAPIError(
+                    f"Kalshi API returned an unexpected response shape from "
+                    f"GET /markets (tickers batch starting {chunk[0]!r}): "
+                    f"{type(e).__name__}: {e}") from e
         return rows
 
     # -- MarketDataSource explicitly does NOT cover wallet discovery -------
