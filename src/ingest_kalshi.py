@@ -332,22 +332,16 @@ class KalshiSource:
         _require_aware(end, "end")
         ticker, side = self._split_token(token_id)
         series_ticker = self._series_ticker(ticker)
-        # KNOWN GAP (WP-3 review, deferred): a single call here with no
-        # pagination or awareness of Kalshi's per-call candlestick cap — a
-        # wide `start`/`end` window at fine granularity (e.g. `period='1m'`
-        # over weeks) can silently return a truncated series rather than the
-        # full window. More involved to fix correctly (needs a paging loop
-        # keyed on the response's own bar count/cursor semantics) and lower
-        # value for the MVP's current backtest windows than the other review
-        # items; left as-is.
-        data = self._get(
-            f"/series/{urllib.parse.quote(series_ticker, safe='')}"
-            f"/markets/{urllib.parse.quote(ticker, safe='')}/candlesticks",
-            start_ts=int(start.timestamp()), end_ts=int(end.timestamp()),
-            period_interval=PERIOD_MINUTES[period],
-        )
         candles = []
-        # _get() guarantees `data` is a dict; this try/except covers a
+        # series_ticker can be a cached value pulled straight from a prior
+        # API response's `event["series_ticker"]` (see list_markets()/
+        # _series_ticker()) -- a malformed response can leave it non-string
+        # (None, int, dict, ...), which makes urllib.parse.quote() raise a
+        # bare TypeError. The URL construction lives inside this try/except
+        # (rather than before it) so that failure gets the same
+        # KalshiAPIError treatment as every other shape problem in this
+        # method, instead of escaping uncaught (QA WP-3 follow-up).
+        # _get() guarantees `data` is a dict; this try/except also covers a
         # candlestick entry missing an expected key (e.g. "end_period_ts")
         # or carrying a value this parsing can't work with (e.g. a numeric
         # field that isn't a number) -- valid JSON, wrong shape (QA WP-3
@@ -355,6 +349,20 @@ class KalshiSource:
         # datetime.fromtimestamp() raise OverflowError rather than
         # ValueError, so it's caught here too (reviewer follow-up).
         try:
+            # KNOWN GAP (WP-3 review, deferred): a single call here with no
+            # pagination or awareness of Kalshi's per-call candlestick cap —
+            # a wide `start`/`end` window at fine granularity (e.g.
+            # `period='1m'` over weeks) can silently return a truncated
+            # series rather than the full window. More involved to fix
+            # correctly (needs a paging loop keyed on the response's own bar
+            # count/cursor semantics) and lower value for the MVP's current
+            # backtest windows than the other review items; left as-is.
+            data = self._get(
+                f"/series/{urllib.parse.quote(series_ticker, safe='')}"
+                f"/markets/{urllib.parse.quote(ticker, safe='')}/candlesticks",
+                start_ts=int(start.timestamp()), end_ts=int(end.timestamp()),
+                period_interval=PERIOD_MINUTES[period],
+            )
             for c in data.get("candlesticks") or []:
                 price = c.get("price") or {}
                 o, h, l, cl = (self._dollars(price.get("open_dollars")),

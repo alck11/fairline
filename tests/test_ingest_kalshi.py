@@ -691,6 +691,56 @@ def test_candlesticks_out_of_range_end_period_ts_raises_kalshi_api_error():
         restore()
 
 
+def test_run_kalshi_ingest_malformed_series_ticker_raises_kalshi_api_error():
+    """QA WP-3 follow-up repro (4th untested field, same bug class as the
+    missing-key/malformed-close_time/out-of-range-ts cases above):
+    list_markets() caches series_ticker straight from a malformed /events
+    response (None instead of a string -- valid JSON, wrong shape) via
+    _series_ticker()'s cache. candlesticks() built its request URL with
+    urllib.parse.quote(series_ticker, ...) *before* its own try/except began,
+    so a non-string series_ticker raised a bare TypeError straight out of
+    candlesticks() instead of the usual KalshiAPIError -- confirmed against
+    run_kalshi_ingest.run(), the real ingest entry point, not just the
+    isolated method. The URL construction now lives inside the try/except,
+    so this surfaces as KalshiAPIError like every other malformed-shape
+    case."""
+    def router(path, query):
+        if path == "/events":
+            if query.get("status") == "settled":
+                return {"events": []}
+            return {"events": [{"category": "Climate and Weather",
+                                "series_ticker": None,  # malformed but valid JSON
+                                "markets": [{"ticker": "SOME-TICKER",
+                                            "close_time": "2026-07-20T04:59:00Z"}]}]}
+        raise AssertionError(f"unmocked path: {path}")
+
+    calls, restore = install_fixture_router(router)
+
+    orig_upsert_market = store.upsert_market
+    orig_upsert_outcomes = store.upsert_outcomes
+    orig_upsert_candles = store.upsert_candles
+    orig_apply_resolutions = store.apply_resolutions
+    store.upsert_market = lambda conn, market: 1
+    store.upsert_outcomes = lambda conn, market_id, outcomes: None
+    store.upsert_candles = lambda conn, candles: None
+    store.apply_resolutions = lambda conn, resolutions: None
+    try:
+        src = KalshiSource()
+        try:
+            run_kalshi_ingest.run(src, conn=None, category="weather", limit=3,
+                                  days=2, period="1h")
+            raise AssertionError("malformed series_ticker should raise KalshiAPIError")
+        except KalshiAPIError as e:
+            check("SOME-TICKER" in str(e) and "TypeError" in str(e),
+                  f"error message should name the ticker and TypeError: {e}")
+    finally:
+        restore()
+        store.upsert_market = orig_upsert_market
+        store.upsert_outcomes = orig_upsert_outcomes
+        store.upsert_candles = orig_upsert_candles
+        store.apply_resolutions = orig_apply_resolutions
+
+
 def test_run_kalshi_ingest_main_returns_nonzero_on_api_failure():
     """run_kalshi_ingest.main() is the documented entry point (US-2: "exits
     non-zero with a clear error on API/rate-limit failure"). Stub store.connect
@@ -818,6 +868,7 @@ def main() -> int:
         test_list_markets_malformed_close_time_raises_kalshi_api_error,
         test_resolutions_malformed_close_time_raises_kalshi_api_error,
         test_candlesticks_out_of_range_end_period_ts_raises_kalshi_api_error,
+        test_run_kalshi_ingest_malformed_series_ticker_raises_kalshi_api_error,
         test_run_kalshi_ingest_main_returns_nonzero_on_api_failure,
         test_run_kalshi_ingest_calls_apply_resolutions_with_real_data,
     ]
