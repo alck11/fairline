@@ -394,6 +394,23 @@ class KalshiSource:
                               self._dollars(price.get("high_dollars")),
                               self._dollars(price.get("low_dollars")),
                               self._dollars(price.get("close_dollars")))
+                # `_dollars()` only checks "is this a parseable float" -- a
+                # malformed-but-valid response (e.g. open_dollars: "1.5" or
+                # "-0.1") parses fine, no null, no type error, and used to
+                # flow straight into a Candle. It only blew up two layers
+                # down when store.upsert_candles hit Postgres's own
+                # `CHECK (open BETWEEN 0 AND 1 AND ...)` constraint
+                # (schema/002_kalshi_ev.sql) as a bare psycopg
+                # CheckViolation, not KalshiAPIError (reviewer round 6
+                # follow-up). Reject here instead of clamping, matching
+                # every other malformed-field case in this file (fail loud).
+                for field, val in (("open_dollars", o), ("high_dollars", h),
+                                   ("low_dollars", l), ("close_dollars", cl)):
+                    if val is not None and not (0.0 <= val <= 1.0):
+                        raise ValueError(
+                            f"candlestick {field} out of range for "
+                            f"{ticker!r}: {val!r} (Kalshi dollar prices "
+                            f"must be within [0, 1])")
                 if None in (o, h, l, cl):
                     # no trades in this bar (Kalshi's `price` fields are null
                     # when nothing traded) -- fall back to the yes bid/ask

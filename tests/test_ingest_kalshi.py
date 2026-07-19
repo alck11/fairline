@@ -24,6 +24,8 @@ Traces to docs/architecture/plan.md WP-3 acceptance (US-2 G/W/T):
   - the adapter exits non-zero with a clear error on API/rate-limit failure
   - no trading/execution code is present (data only)
 """
+import contextlib
+import io
 import json
 import os
 import sys
@@ -742,6 +744,49 @@ def test_candlesticks_out_of_range_end_period_ts_raises_kalshi_api_error():
         restore()
 
 
+def test_candlesticks_out_of_range_open_dollars_raises_kalshi_api_error():
+    """Reviewer round 6 finding (live-proven), the last of a chain of six
+    review/QA rounds each catching one more untested field: candlesticks()
+    parsed OHLC via _dollars() but never validated the result was within
+    Kalshi's valid price range. _dollars() only checks "is this a
+    parseable float" -- a malformed-but-valid response (open_dollars:
+    "1.5") parses fine, no null, no type error, and used to flow straight
+    into a Candle. It only blew up two layers down when store.upsert_candles
+    hit Postgres's `CHECK (open BETWEEN 0 AND 1 AND ...)` constraint
+    (schema/002_kalshi_ev.sql) as a bare psycopg CheckViolation, not
+    KalshiAPIError. Also covers the negative-value case (the reviewer noted
+    the CHECK rejects those too, not just >1) via a second field."""
+    def router(path, query):
+        if path == "/markets/KXHIGHNY-26JUL19-T80":
+            return _load("market_single.json")
+        if path == "/events/KXHIGHNY-26JUL19":
+            return _load("event_single.json")
+        if path.startswith("/series/") and path.endswith("/candlesticks"):
+            return {"candlesticks": [{"price": {"open_dollars": "1.5",
+                                                 "high_dollars": "0.6",
+                                                 "low_dollars": "-0.1",
+                                                 "close_dollars": "0.5"},
+                                       "volume_fp": "10",
+                                       "end_period_ts": 1784620800}]}
+        raise AssertionError(f"unmocked path: {path}")
+
+    calls, restore = install_fixture_router(router)
+    try:
+        src = KalshiSource(max_retries=2)
+        start = datetime(2026, 7, 17, tzinfo=timezone.utc)
+        end = datetime(2026, 7, 19, tzinfo=timezone.utc)
+        try:
+            src.candlesticks("KXHIGHNY-26JUL19-T80-YES", start=start, end=end, period="1h")
+            raise AssertionError("out-of-range open_dollars should raise KalshiAPIError, "
+                                  "not escape as a bare ValueError / later surface as a "
+                                  "Postgres CheckViolation")
+        except KalshiAPIError as e:
+            check("KXHIGHNY-26JUL19-T80" in str(e) and "1.5" in str(e),
+                  f"error message should name the ticker and out-of-range value: {e}")
+    finally:
+        restore()
+
+
 def test_run_kalshi_ingest_malformed_series_ticker_raises_kalshi_api_error():
     """QA WP-3 follow-up repro (4th untested field, same bug class as the
     missing-key/malformed-close_time/out-of-range-ts cases above):
@@ -823,6 +868,55 @@ def test_run_kalshi_ingest_main_returns_nonzero_on_api_failure():
         run_kalshi_ingest.KalshiSource = orig_source
 
     check(rc == 1, f"main() should return 1 on KalshiAPIError, got {rc}")
+
+
+def test_run_kalshi_ingest_main_returns_nonzero_on_unexpected_error():
+    """Structural backstop for the whack-a-mole pattern this file's other
+    tests each closed one field at a time (four narrow patches landed:
+    08d5b74, 7a6e861, d71aac7, d91a7a8; this is the fifth, the OHLC-range
+    bug above). Per the user's explicit direction: rather than keep chasing
+    individual untested fields, run_kalshi_ingest.main() now has a second,
+    broader except clause after the KalshiAPIError one that catches any
+    other exception escaping run() -- e.g. a bare psycopg error, or any
+    future Python exception type nobody has thought to test yet -- and
+    turns it into the same class of outcome (clear stderr message,
+    non-zero exit) instead of a bare uncaught traceback. This monkeypatches
+    run() itself to raise an arbitrary non-KalshiAPIError exception (a
+    stand-in for "some malformed field nobody tested yet"), rather than
+    needing a real malformed-field trigger."""
+
+    class _DummyConn:
+        def execute(self, *a, **kw):
+            return None
+
+        def close(self):
+            pass
+
+    def _boom(*a, **kw):
+        raise RuntimeError("simulated bare exception from a Postgres "
+                            "CheckViolation or other untested failure mode")
+
+    orig_connect = store.connect
+    orig_run = run_kalshi_ingest.run
+    store.connect = lambda: _DummyConn()
+    run_kalshi_ingest.run = _boom
+    captured = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(captured):
+            rc = run_kalshi_ingest.main(["--limit", "1"])
+    finally:
+        store.connect = orig_connect
+        run_kalshi_ingest.run = orig_run
+
+    check(rc == 1, f"main() should return 1 on a non-KalshiAPIError exception "
+                    f"escaping run(), got {rc}")
+    stderr_text = captured.getvalue()
+    check("unexpected" in stderr_text and "RuntimeError" in stderr_text,
+          f"stderr should carry a clear message naming it as unexpected and "
+          f"the real exception type, got: {stderr_text!r}")
+    check("Traceback" in stderr_text,
+          f"the underlying traceback should not be swallowed silently, "
+          f"got: {stderr_text!r}")
 
 
 def test_run_kalshi_ingest_calls_apply_resolutions_with_real_data():
@@ -921,8 +1015,10 @@ def main() -> int:
         test_list_markets_malformed_close_time_raises_kalshi_api_error,
         test_resolutions_malformed_close_time_raises_kalshi_api_error,
         test_candlesticks_out_of_range_end_period_ts_raises_kalshi_api_error,
+        test_candlesticks_out_of_range_open_dollars_raises_kalshi_api_error,
         test_run_kalshi_ingest_malformed_series_ticker_raises_kalshi_api_error,
         test_run_kalshi_ingest_main_returns_nonzero_on_api_failure,
+        test_run_kalshi_ingest_main_returns_nonzero_on_unexpected_error,
         test_run_kalshi_ingest_calls_apply_resolutions_with_real_data,
     ]
     failures = 0

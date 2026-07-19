@@ -34,6 +34,7 @@ sizing, or a trading signal (that starts at WP-4) and never places an order.
 from __future__ import annotations
 import argparse
 import sys
+import traceback
 from datetime import datetime, timedelta, timezone
 
 import store
@@ -111,6 +112,31 @@ def main(argv: list[str] | None = None) -> int:
                days=args.days, period=args.period)
     except KalshiAPIError as e:
         print(f"Kalshi API failure: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        # Last-resort net for this CLI entry point (US-2: "exits non-zero
+        # with a clear error on API/rate-limit failure", never a bare
+        # traceback). KalshiSource is supposed to translate every malformed
+        # Kalshi response into KalshiAPIError, but four rounds of QA/review
+        # each found one more untested field that slipped past parse-time
+        # validation and only surfaced two layers down as a bare exception
+        # out of store.py's Postgres upserts (e.g. psycopg.errors.
+        # CheckViolation/NotNullViolation) -- or, in principle, any other
+        # Python exception nobody has thought to test yet. This clause is
+        # a structural backstop, not a substitute for fixing the source
+        # (the closer to the source an error is caught, the better the
+        # message -- Part 1 above and the four prior field-specific fixes
+        # still matter): it's deliberately broader, and its message
+        # deliberately says "unexpected" to distinguish it from
+        # KalshiAPIError's specific, well-formed message above. The
+        # traceback is printed (not swallowed) for debugging, but the
+        # process still exits via this function's normal `return 1` --
+        # same class of outcome as the KalshiAPIError branch -- rather than
+        # letting the exception itself escape main() uncaught.
+        print(f"unexpected error during Kalshi ingest (not a KalshiAPIError -- "
+              f"likely an untested malformed-field case; see traceback below): "
+              f"{type(e).__name__}: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         return 1
     finally:
         conn.close()
