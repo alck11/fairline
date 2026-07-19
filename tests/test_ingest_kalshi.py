@@ -788,6 +788,147 @@ def test_candlesticks_out_of_range_open_dollars_raises_kalshi_api_error():
         restore()
 
 
+def test_candlesticks_out_of_range_yes_bid_ask_midpoint_escapes_validation():
+    """QA round 5 (WP-3 closing pass, live-reproduced): the round-6/7186963
+    range check (see test_candlesticks_out_of_range_open_dollars_raises_
+    kalshi_api_error above) only ever sees the `price` object's OHLC
+    fields. candlesticks() has a SECOND, separate source of OHLC values --
+    when a bar has no trades, every price.*_dollars field is null (a real,
+    documented Kalshi condition) and the code falls back to the midpoint of
+    yes_bid/yes_ask. That fallback parses its own dollar fields via the same
+    _dollars() helper, but the loop above runs *before* the fallback branch,
+    so it can only ever see the (already-null) price values, never the
+    computed fallback -- a yes_bid/yes_ask pair with out-of-range dollar
+    values (e.g. "5.0"/"9.0", exactly as malformed as the already-fixed
+    price.open_dollars: "1.5" case) used to produce a Candle with
+    open=high=low=close=7.0 -- a "probability" of 7.0 -- with no exception
+    raised anywhere in KalshiSource.candlesticks(). Any direct caller of
+    candlesticks() that doesn't route through store.upsert_candles() (whose
+    Postgres CHECK constraint happened to catch this by accident) would get
+    silently corrupted probability data with zero error signal. Fixed by
+    re-running the same [0, 1] range check on o/h/l/cl again after the
+    fallback substitution, before the Candle is built."""
+    def router(path, query):
+        if path == "/markets/KXHIGHNY-26JUL19-T80":
+            return _load("market_single.json")
+        if path == "/events/KXHIGHNY-26JUL19":
+            return _load("event_single.json")
+        if path.startswith("/series/") and path.endswith("/candlesticks"):
+            return {"candlesticks": [{
+                "price": {"open_dollars": None, "high_dollars": None,
+                          "low_dollars": None, "close_dollars": None},
+                "yes_bid": {"open_dollars": "5.0", "high_dollars": "5.0",
+                           "low_dollars": "5.0", "close_dollars": "5.0"},
+                "yes_ask": {"open_dollars": "9.0", "high_dollars": "9.0",
+                           "low_dollars": "9.0", "close_dollars": "9.0"},
+                "volume_fp": "10", "end_period_ts": 1784620800,
+            }]}
+        raise AssertionError(f"unmocked path: {path}")
+
+    calls, restore = install_fixture_router(router)
+    try:
+        src = KalshiSource(max_retries=2)
+        start = datetime(2026, 7, 17, tzinfo=timezone.utc)
+        end = datetime(2026, 7, 19, tzinfo=timezone.utc)
+        try:
+            candles = src.candlesticks("KXHIGHNY-26JUL19-T80-YES", start=start,
+                                       end=end, period="1h")
+            raise AssertionError(
+                f"candlesticks() should raise KalshiAPIError for an "
+                f"out-of-range yes_bid/yes_ask midpoint fallback (same bug "
+                f"class as the already-fixed price.*_dollars-out-of-range "
+                f"case), but returned silently: {candles!r}")
+        except KalshiAPIError as e:
+            check("KXHIGHNY-26JUL19-T80" in str(e),
+                  f"error message should name the ticker: {e}")
+    finally:
+        restore()
+
+
+def test_run_kalshi_ingest_main_survives_out_of_range_midpoint_fallback():
+    """CLI-level companion to the test above, driven through the real CLI
+    entry point (run_kalshi_ingest.main()) against a REAL throwaway Postgres
+    (skips cleanly if unavailable, same convention as
+    tests/test_ingest_kalshi_qa_e2e.py, whose provisioning helpers this
+    reuses). Before the fix above, the bad Candle reached
+    store.upsert_candles()'s bare INSERT and hit Postgres's
+    `CHECK (open BETWEEN 0 AND 1 AND ...)` constraint (schema/002_kalshi_
+    ev.sql) as a bare psycopg.errors.CheckViolation -- not KalshiAPIError --
+    which main()'s generic `except Exception` backstop (commit 7186963)
+    still caught (clear "unexpected error" message, non-zero exit, no
+    hang), so this was never a CLI-level regression, just an adapter-level
+    data-correctness gap for any non-store-backed caller. Now that
+    candlesticks() itself raises KalshiAPIError for the bad midpoint, this
+    same rc==1 is produced by main()'s specific `except KalshiAPIError`
+    clause instead of the generic backstop -- this test still confirms
+    rc==1 either way, it just no longer depends on the DB CHECK constraint
+    to get there."""
+    tests_dir = os.path.dirname(__file__)
+    if tests_dir not in sys.path:
+        sys.path.insert(0, tests_dir)
+    import test_ingest_kalshi_qa_e2e as qa_e2e
+
+    base = qa_e2e._base_conninfo()
+    if not base:
+        print("SKIPPED: test_run_kalshi_ingest_main_survives_out_of_range_"
+              "midpoint_fallback -- no Postgres reachable (set $DATABASE_URL "
+              "or `pip install pgserver`); not a code defect, just missing "
+              "local infra.")
+        return
+
+    dsn = qa_e2e._provision(base)
+    if dsn is None:
+        print("SKIPPED: test_run_kalshi_ingest_main_survives_out_of_range_"
+              "midpoint_fallback -- could not provision a throwaway database")
+        return
+
+    import psycopg
+    conn = psycopg.connect(dsn, autocommit=True)
+    try:
+        qa_e2e._apply_schema(conn)
+
+        def _full_router(path, query):
+            if path == "/events":
+                if query.get("status") == "settled":
+                    return {"events": []}
+                return {"events": [{"category": "Climate and Weather",
+                                    "series_ticker": "S-ROUND5",
+                                    "markets": [{"ticker": "KX-ROUND5-TICKER",
+                                                "close_time": "2026-07-20T04:59:00Z"}]}]}
+            if path == "/markets/KX-ROUND5-TICKER":
+                return {"market": {"event_ticker": "E-ROUND5"}}
+            if path == "/events/E-ROUND5":
+                return {"event": {"series_ticker": "S-ROUND5"}}
+            if path.startswith("/series/") and path.endswith("/candlesticks"):
+                return {"candlesticks": [{
+                    "price": {"open_dollars": None, "high_dollars": None,
+                              "low_dollars": None, "close_dollars": None},
+                    "yes_bid": {"open_dollars": "5.0", "high_dollars": "5.0",
+                               "low_dollars": "5.0", "close_dollars": "5.0"},
+                    "yes_ask": {"open_dollars": "9.0", "high_dollars": "9.0",
+                               "low_dollars": "9.0", "close_dollars": "9.0"},
+                    "volume_fp": "10", "end_period_ts": 1784620800,
+                }]}
+            raise AssertionError(f"unmocked path: {path}")
+
+        calls, restore = install_fixture_router(_full_router)
+        orig_connect = store.connect
+        store.connect = lambda: conn
+        try:
+            rc = run_kalshi_ingest.main(["--category", "weather", "--limit", "1"])
+        finally:
+            restore()
+            store.connect = orig_connect
+
+        check(rc == 1,
+              f"main() should exit non-zero for the out-of-range midpoint "
+              f"candle (now via candlesticks()'s own KalshiAPIError, not "
+              f"just the DB CHECK-constraint backstop), got rc={rc}")
+    finally:
+        conn.close()
+        qa_e2e._teardown_db(dsn)
+
+
 def test_run_kalshi_ingest_malformed_series_ticker_raises_kalshi_api_error():
     """QA WP-3 follow-up repro (4th untested field, same bug class as the
     missing-key/malformed-close_time/out-of-range-ts cases above):
@@ -1118,6 +1259,8 @@ def main() -> int:
         test_resolutions_malformed_close_time_raises_kalshi_api_error,
         test_candlesticks_out_of_range_end_period_ts_raises_kalshi_api_error,
         test_candlesticks_out_of_range_open_dollars_raises_kalshi_api_error,
+        test_candlesticks_out_of_range_yes_bid_ask_midpoint_escapes_validation,
+        test_run_kalshi_ingest_main_survives_out_of_range_midpoint_fallback,
         test_run_kalshi_ingest_malformed_series_ticker_raises_kalshi_api_error,
         test_run_kalshi_ingest_main_returns_nonzero_on_api_failure,
         test_run_kalshi_ingest_main_returns_nonzero_on_unexpected_error,

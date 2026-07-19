@@ -466,6 +466,25 @@ class KalshiSource:
                     h = h if h is not None else mid("high_dollars")
                     l = l if l is not None else mid("low_dollars")
                     cl = cl if cl is not None else mid("close_dollars")
+                    # The range-check loop above only ever sees the (already-
+                    # null) `price` fields on this path -- it runs before this
+                    # fallback substitution, so a malformed yes_bid/yes_ask
+                    # pair (e.g. "5.0"/"9.0") produced a midpoint that flowed
+                    # straight into the Candle unchecked, exactly the
+                    # "silently succeeds when it shouldn't" gap the above
+                    # check was built to close, just via the fallback source
+                    # instead of the primary one (QA round 5). Re-run the same
+                    # [0, 1] check on the final substituted values here, still
+                    # before the YES/NO complement math below so both sides
+                    # get the same validation on the same underlying value.
+                    for field, val in (("open_dollars", o), ("high_dollars", h),
+                                       ("low_dollars", l), ("close_dollars", cl)):
+                        if val is not None and not (0.0 <= val <= 1.0):
+                            raise ValueError(
+                                f"candlestick {field} (yes_bid/yes_ask "
+                                f"midpoint fallback) out of range for "
+                                f"{ticker!r}: {val!r} (Kalshi dollar prices "
+                                f"must be within [0, 1])")
                 volume = self._dollars(c.get("volume_fp"))
                 ts = datetime.fromtimestamp(c["end_period_ts"], tz=timezone.utc)
                 if side == "yes":
