@@ -264,7 +264,9 @@ class KalshiSource:
             # _get() guarantees `page` itself is a dict; this try/except
             # covers a dict missing an expected key or nesting a non-dict
             # where a market/event object is expected -- valid JSON, wrong
-            # shape (QA WP-3 follow-up).
+            # shape (QA WP-3 follow-up) -- including a non-ISO close_time
+            # string, which reaches _parse_market -> _ts and raises
+            # ValueError (reviewer follow-up).
             try:
                 events = page.get("events") or []
                 for ev in events:
@@ -281,7 +283,7 @@ class KalshiSource:
                     if len(rows) >= limit:
                         break
                 cursor = page.get("cursor")
-            except (KeyError, TypeError, AttributeError) as e:
+            except (KeyError, TypeError, AttributeError, ValueError) as e:
                 raise KalshiAPIError(
                     f"Kalshi API returned an unexpected response shape from "
                     f"GET /events (status={status!r}): "
@@ -349,7 +351,9 @@ class KalshiSource:
         # candlestick entry missing an expected key (e.g. "end_period_ts")
         # or carrying a value this parsing can't work with (e.g. a numeric
         # field that isn't a number) -- valid JSON, wrong shape (QA WP-3
-        # follow-up).
+        # follow-up). An out-of-range end_period_ts (e.g. 10**20) makes
+        # datetime.fromtimestamp() raise OverflowError rather than
+        # ValueError, so it's caught here too (reviewer follow-up).
         try:
             for c in data.get("candlesticks") or []:
                 price = c.get("price") or {}
@@ -386,7 +390,7 @@ class KalshiSource:
                         ts, token_id,
                         open=1.0 - o, high=1.0 - l, low=1.0 - h, close=1.0 - cl,
                         volume=volume))
-        except (KeyError, TypeError, ValueError, AttributeError) as e:
+        except (KeyError, TypeError, ValueError, AttributeError, OverflowError) as e:
             raise KalshiAPIError(
                 f"Kalshi API returned an unexpected candlestick shape for "
                 f"{ticker!r}: {type(e).__name__}: {e}") from e
@@ -407,7 +411,9 @@ class KalshiSource:
             # _get() guarantees `data` is a dict; this try/except covers a
             # market entry missing an expected key (e.g. "ticker") -- valid
             # JSON, wrong shape (QA WP-3 follow-up: the exact repro was a
-            # resolved market missing "ticker").
+            # resolved market missing "ticker") -- including a non-ISO
+            # close_time string, which raises ValueError out of _ts()
+            # (reviewer follow-up).
             try:
                 for m in data.get("markets") or []:
                     if m.get("status") not in RESOLVED_STATUSES:
@@ -420,7 +426,7 @@ class KalshiSource:
                     yes_value = 1.0 if result == "yes" else 0.0
                     rows.append(ResolutionRow(ticker, f"{ticker}-YES", yes_value, resolved_at))
                     rows.append(ResolutionRow(ticker, f"{ticker}-NO", 1.0 - yes_value, resolved_at))
-            except (KeyError, TypeError, AttributeError) as e:
+            except (KeyError, TypeError, AttributeError, ValueError) as e:
                 raise KalshiAPIError(
                     f"Kalshi API returned an unexpected response shape from "
                     f"GET /markets (tickers batch starting {chunk[0]!r}): "

@@ -505,7 +505,62 @@ def test_resolutions_missing_ticker_key_raises_kalshi_api_error():
             src.resolutions(["FOO-TICKER"])
             raise AssertionError("missing 'ticker' key should raise KalshiAPIError")
         except KalshiAPIError as e:
-            check("ticker" in str(e).lower(), f"error message should name the field: {e}")
+            # tightened per reviewer: the endpoint literal "tickers batch" in
+            # the wrapper message contains "ticker" regardless of which field
+            # actually went missing, so plain substring "ticker" would pass
+            # even if the underlying KeyError were about something else.
+            # Assert the actual failure -- KeyError: 'ticker' -- is present.
+            check("KeyError" in str(e) and "'ticker'" in str(e),
+                  f"error message should name the actual KeyError on 'ticker': {e}")
+    finally:
+        restore()
+
+
+def test_list_markets_malformed_close_time_raises_kalshi_api_error():
+    """Reviewer follow-up on WP-3 (commit 08d5b74): a syntactically valid
+    /events response with a non-ISO close_time string used to raise a bare
+    ValueError out of _ts() (via _parse_market), escaping list_markets's
+    KalshiAPIError wrapper -- the same bug class QA originally reported
+    (bare traceback instead of a clear error), just triggered by a malformed
+    field *value* instead of a missing key."""
+    def router(path, query):
+        return {"events": [{"category": "Climate and Weather",
+                            "series_ticker": "KXHIGHNY",
+                            "markets": [{"ticker": "SOME-TICKER",
+                                        "close_time": "not-a-real-date"}]}]}
+
+    calls, restore = install_fixture_router(router)
+    try:
+        src = KalshiSource(max_retries=2)
+        try:
+            src.list_markets(category="weather", limit=3)
+            raise AssertionError("malformed close_time should raise KalshiAPIError")
+        except KalshiAPIError as e:
+            check("ValueError" in str(e) and "not-a-real-date" in str(e),
+                  f"error message should name the ValueError and bad value: {e}")
+    finally:
+        restore()
+
+
+def test_resolutions_malformed_close_time_raises_kalshi_api_error():
+    """Reviewer follow-up on WP-3 (commit 08d5b74): a syntactically valid
+    /markets response with a non-ISO close_time string used to raise a bare
+    ValueError out of _ts(), escaping resolutions()'s KalshiAPIError
+    wrapper -- same bug class as test_list_markets_malformed_close_time
+    above, for the second call site that reaches _ts() directly."""
+    def router(path, query):
+        return {"markets": [{"ticker": "FOO-TICKER", "status": "finalized",
+                             "result": "yes", "close_time": "not-a-real-date"}]}
+
+    calls, restore = install_fixture_router(router)
+    try:
+        src = KalshiSource(max_retries=2)
+        try:
+            src.resolutions(["FOO-TICKER"])
+            raise AssertionError("malformed close_time should raise KalshiAPIError")
+        except KalshiAPIError as e:
+            check("ValueError" in str(e) and "not-a-real-date" in str(e),
+                  f"error message should name the ValueError and bad value: {e}")
     finally:
         restore()
 
@@ -597,6 +652,41 @@ def test_candlesticks_missing_key_raises_kalshi_api_error():
             raise AssertionError("missing 'end_period_ts' should raise KalshiAPIError")
         except KalshiAPIError as e:
             check("KXHIGHNY-26JUL19-T80" in str(e), f"error message should name the ticker: {e}")
+    finally:
+        restore()
+
+
+def test_candlesticks_out_of_range_end_period_ts_raises_kalshi_api_error():
+    """Reviewer follow-up on WP-3 (commit 08d5b74): an absurdly out-of-range
+    numeric 'end_period_ts' (e.g. 10**20) makes datetime.fromtimestamp()
+    raise OverflowError, not ValueError -- a different exception type than
+    the malformed-key/malformed-shape cases test_candlesticks_missing_key_
+    raises_kalshi_api_error already covers, and one the original catch tuple
+    didn't include, so it used to escape candlesticks() as a bare
+    OverflowError instead of KalshiAPIError."""
+    def router(path, query):
+        if path == "/markets/KXHIGHNY-26JUL19-T80":
+            return _load("market_single.json")
+        if path == "/events/KXHIGHNY-26JUL19":
+            return _load("event_single.json")
+        if path.startswith("/series/") and path.endswith("/candlesticks"):
+            return {"candlesticks": [{"price": {"open_dollars": "0.5", "high_dollars": "0.6",
+                                                 "low_dollars": "0.4", "close_dollars": "0.5"},
+                                       "volume_fp": "10",
+                                       "end_period_ts": 10**20}]}
+        raise AssertionError(f"unmocked path: {path}")
+
+    calls, restore = install_fixture_router(router)
+    try:
+        src = KalshiSource(max_retries=2)
+        start = datetime(2026, 7, 17, tzinfo=timezone.utc)
+        end = datetime(2026, 7, 19, tzinfo=timezone.utc)
+        try:
+            src.candlesticks("KXHIGHNY-26JUL19-T80-YES", start=start, end=end, period="1h")
+            raise AssertionError("out-of-range end_period_ts should raise KalshiAPIError")
+        except KalshiAPIError as e:
+            check("OverflowError" in str(e) and "KXHIGHNY-26JUL19-T80" in str(e),
+                  f"error message should name the OverflowError and ticker: {e}")
     finally:
         restore()
 
@@ -725,6 +815,9 @@ def main() -> int:
         test_resolutions_missing_ticker_key_raises_kalshi_api_error,
         test_malformed_top_level_body_raises_kalshi_api_error,
         test_candlesticks_missing_key_raises_kalshi_api_error,
+        test_list_markets_malformed_close_time_raises_kalshi_api_error,
+        test_resolutions_malformed_close_time_raises_kalshi_api_error,
+        test_candlesticks_out_of_range_end_period_ts_raises_kalshi_api_error,
         test_run_kalshi_ingest_main_returns_nonzero_on_api_failure,
         test_run_kalshi_ingest_calls_apply_resolutions_with_real_data,
     ]
