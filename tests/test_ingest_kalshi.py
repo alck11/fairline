@@ -565,6 +565,57 @@ def test_resolutions_malformed_close_time_raises_kalshi_api_error():
         restore()
 
 
+def test_resolutions_null_ticker_raises_kalshi_api_error():
+    """Executor WP-3 follow-up audit (QA round 3 flagged this as the sibling
+    of the null-ticker gap in _parse_market/list_markets, "confirmed at the
+    parsing layer, not re-verified against a live DB by QA" --
+    tests/test_ingest_kalshi_qa_round3.py's docstring): a /markets entry with
+    "ticker": null is present (no KeyError) but null -- same class as the
+    already-fixed missing-key variant, just a bad value instead of a missing
+    key. Left unchecked, resolutions() would produce a ResolutionRow with
+    outcome_token_id "None-YES"/"None-NO", which surfaces downstream as a
+    bare KeyError out of store.py's _resolve_outcome_id instead of
+    KalshiAPIError."""
+    def router(path, query):
+        return {"markets": [{"ticker": None, "status": "finalized", "result": "yes",
+                             "close_time": "2026-07-18T04:59:00Z"}]}
+
+    calls, restore = install_fixture_router(router)
+    try:
+        src = KalshiSource(max_retries=2)
+        try:
+            src.resolutions(["FOO-TICKER"])
+            raise AssertionError("ticker=None should raise KalshiAPIError")
+        except KalshiAPIError:
+            pass
+    finally:
+        restore()
+
+
+def test_orderbook_null_price_level_raises_kalshi_api_error():
+    """Executor WP-3 follow-up audit: a level pair with a null price (e.g.
+    [null, "10"]) is syntactically valid JSON -- `_dollars(None)` returns
+    None (the right call for an optional single field, wrong for a required
+    price inside a level pair). Before this fix, the arithmetic/sort that
+    turns levels into asks/bids sat *outside* orderbook()'s try/except, so
+    `1.0 - None` / `-None` raised a bare TypeError instead of
+    KalshiAPIError -- same bug class as the ticker gaps above, just in the
+    orderbook parsing path instead of market/resolution parsing."""
+    def router(path, query):
+        return {"orderbook_fp": {"yes_dollars": [[None, "10"]], "no_dollars": []}}
+
+    calls, restore = install_fixture_router(router)
+    try:
+        src = KalshiSource(max_retries=2)
+        try:
+            src.orderbook("SOME-TICKER-YES")
+            raise AssertionError("null price level should raise KalshiAPIError")
+        except KalshiAPIError as e:
+            check("SOME-TICKER" in str(e), f"error message should name the ticker: {e}")
+    finally:
+        restore()
+
+
 def test_malformed_top_level_body_raises_kalshi_api_error():
     """QA WP-3 follow-up repro: a top-level JSON body that isn't a dict
     (null / bare list / string) used to bypass _get()'s error wrapping and
@@ -856,6 +907,8 @@ def main() -> int:
         test_candlesticks_invalid_period_no_network,
         test_resolutions_two_sided,
         test_resolutions_empty_input_no_network,
+        test_resolutions_null_ticker_raises_kalshi_api_error,
+        test_orderbook_null_price_level_raises_kalshi_api_error,
         test_candle_and_resolution_row_match_store_shape,
         test_wallet_trades_raises,
         test_leaderboard_raises,

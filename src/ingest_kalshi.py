@@ -217,6 +217,19 @@ class KalshiSource:
     @staticmethod
     def _parse_market(m: dict, category: str) -> MarketRow:
         ticker = m["ticker"]
+        if not isinstance(ticker, str) or not ticker:
+            # present (no KeyError) but null/empty/wrong-type -- syntactically
+            # valid JSON, wrong shape (QA WP-3 round 3). Left unchecked, `None`
+            # is a perfectly legal value to sit in MarketRow.external_id and in
+            # the synthesized "{ticker}-YES"/"{ticker}-NO" token ids -- no
+            # Python exception fires here, so it isn't caught by this method's
+            # callers' try/except at all. It only surfaces two layers down,
+            # when run_kalshi_ingest.run() passes the row to
+            # store.upsert_market(), which hits Postgres's NOT NULL constraint
+            # on market.external_id and raises a bare, uncaught
+            # psycopg.errors.NotNullViolation.
+            raise ValueError(
+                f"'ticker' must be a non-empty string, got {ticker!r}")
         outcomes = (
             OutcomeRef(f"{ticker}-YES", m.get("yes_sub_title") or "YES", 0),
             OutcomeRef(f"{ticker}-NO", m.get("no_sub_title") or "NO", 1),
@@ -299,27 +312,39 @@ class KalshiSource:
         # missing "orderbook_fp" key, a non-dict value in its place, or
         # price/size levels that aren't the [price, size] pairs this parsing
         # assumes -- valid JSON, wrong shape (QA WP-3 follow-up).
+        # the arithmetic/sort below used to sit *after* this try/except, so a
+        # level with a null/empty price -- `_dollars()` treats None/"" as "no
+        # value", the right call for an optional single field, but wrong for
+        # a required price inside a level pair -- passed parsing silently and
+        # only blew up as a bare TypeError two statements later (`1.0 - p` /
+        # `-l[0]` on a None), outside this method's KalshiAPIError contract
+        # (QA WP-3 follow-up audit). Both the parsing and the arithmetic that
+        # depends on it now live inside one try/except.
         try:
             data = resp["orderbook_fp"]
             yes_levels = [(self._dollars(p), float(sz))
                           for p, sz in (data.get("yes_dollars") or [])]
             no_levels = [(self._dollars(p), float(sz))
                          for p, sz in (data.get("no_dollars") or [])]
+            if any(p is None for p, _ in yes_levels) or any(p is None for p, _ in no_levels):
+                raise ValueError(
+                    f"orderbook for {ticker!r} contains a level with a "
+                    f"null/empty price")
+            # a resting bid for the OTHER side at price q is equivalent to a
+            # resting ask for THIS side at price (1 - q) — Kalshi's YES/NO
+            # complementary pricing (the orderbook endpoint's own documented
+            # note); see module docstring.
+            if side == "yes":
+                bids, asks_raw = yes_levels, no_levels
+            else:
+                bids, asks_raw = no_levels, yes_levels
+            asks = [(round(1.0 - p, 4), sz) for p, sz in asks_raw]
+            bids_sorted = tuple(sorted(bids, key=lambda l: -l[0]))
+            asks_sorted = tuple(sorted(asks, key=lambda l: l[0]))
         except (KeyError, TypeError, ValueError, AttributeError) as e:
             raise KalshiAPIError(
                 f"Kalshi API returned an unexpected orderbook shape for "
                 f"{ticker!r}: {type(e).__name__}: {e}") from e
-        # a resting bid for the OTHER side at price q is equivalent to a
-        # resting ask for THIS side at price (1 - q) — Kalshi's YES/NO
-        # complementary pricing (the orderbook endpoint's own documented
-        # note); see module docstring.
-        if side == "yes":
-            bids, asks_raw = yes_levels, no_levels
-        else:
-            bids, asks_raw = no_levels, yes_levels
-        asks = [(round(1.0 - p, 4), sz) for p, sz in asks_raw]
-        bids_sorted = tuple(sorted(bids, key=lambda l: -l[0]))
-        asks_sorted = tuple(sorted(asks, key=lambda l: l[0]))
         return BookSnapshot(ts=datetime.now(timezone.utc), token_id=token_id,
                             bids=bids_sorted, asks=asks_sorted)
 
@@ -430,6 +455,15 @@ class KalshiSource:
                     if result not in ("yes", "no"):
                         continue
                     ticker = m["ticker"]
+                    if not isinstance(ticker, str) or not ticker:
+                        # sibling of _parse_market's ticker gap (QA WP-3
+                        # round 3 noted both parsing sites share it): a null
+                        # ticker here would produce a ResolutionRow with
+                        # outcome_token_id "None-YES"/"None-NO", which later
+                        # raises a bare KeyError out of store.py's
+                        # _resolve_outcome_id instead of KalshiAPIError.
+                        raise ValueError(
+                            f"'ticker' must be a non-empty string, got {ticker!r}")
                     resolved_at = self._ts(m.get("close_time"))
                     yes_value = 1.0 if result == "yes" else 0.0
                     rows.append(ResolutionRow(ticker, f"{ticker}-YES", yes_value, resolved_at))
