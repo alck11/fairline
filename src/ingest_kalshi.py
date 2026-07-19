@@ -10,12 +10,23 @@ public per-trader feed to back them (see ADR-0006 "Split 2").
 
 Endpoints used (all confirmed live and public 2026-07-18 against
 https://external-api.kalshi.com/trade-api/v2 — no API key, no auth headers;
-see docs.kalshi.com/api-reference):
+see docs.kalshi.com/api-reference). `external-api.kalshi.com` is Kalshi's own
+documented *recommended* host (docs.kalshi.com/getting_started/api_environments);
+`api.elections.kalshi.com` is the older shared host, still supported and
+confirmed live to return byte-identical responses, but not the canonical
+default — this module picks the recommended one:
 
     GET /events?with_nested_markets=true&series_ticker=...   -> list_markets
         (category is NOT a server-side filter on this endpoint — verified
         live: passing category= is silently ignored — so KalshiSource filters
-        client-side on each event's `category` field instead.)
+        client-side on each event's `category` field instead. `status` IS a
+        server-side filter on this endpoint, but its accepted values are
+        event-level statuses — confirmed live: 'open', 'closed', 'settled',
+        'unopened' — distinct from the market-level statuses nested markets
+        carry ('active', 'finalized', ...). list_markets's `active` param
+        maps active=True -> status='open', active=False -> status='settled',
+        so a caller can fetch either currently-tradable or already-resolved
+        markets explicitly.)
     GET /markets/{ticker}/orderbook                          -> orderbook
     GET /series/{series_ticker}/markets/{ticker}/candlesticks -> candlesticks
         (the `/historical/markets/{ticker}/candlesticks` variant 404s for
@@ -72,6 +83,18 @@ PERIOD_MINUTES = {"1m": 1, "1h": 60, "1d": 1440}
 RESOLVED_STATUSES = {"finalized", "settled", "determined"}
 
 
+def _require_aware(dt: datetime, name: str) -> None:
+    """A naive datetime would have int(dt.timestamp()) interpreted in the
+    local system timezone, silently shifting the candlestick window's
+    start_ts/end_ts Kalshi actually queries — mirrors store.py's own
+    `_require_aware` convention (WP-1) for the same class of bug."""
+    if dt.tzinfo is None:
+        raise ValueError(
+            f"{name} must be timezone-aware, got naive datetime {dt!r} — a "
+            f"naive value is interpreted in the local system timezone, "
+            f"silently shifting the candlestick window")
+
+
 class KalshiAPIError(RuntimeError):
     """Raised on an unrecoverable Kalshi API failure: HTTP error, rate limit
     exhausted after retries, or a malformed response. A plain RuntimeError
@@ -113,16 +136,19 @@ class KalshiSource:
             except urllib.error.HTTPError as e:
                 last_err = e
                 if e.code == 429 or e.code >= 500:
-                    time.sleep(self.backoff * (2 ** attempt))
+                    if attempt < self.max_retries - 1:
+                        time.sleep(self.backoff * (2 ** attempt))
                     continue
                 raise KalshiAPIError(
                     f"Kalshi API error {e.code} for {url}: {e.reason}") from e
             except urllib.error.URLError as e:
                 last_err = e
-                time.sleep(self.backoff * (2 ** attempt))
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.backoff * (2 ** attempt))
             except (json.JSONDecodeError, TimeoutError) as e:
                 last_err = e
-                time.sleep(self.backoff * (2 ** attempt))
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.backoff * (2 ** attempt))
         raise KalshiAPIError(
             f"Kalshi API unreachable after {self.max_retries} attempt(s): "
             f"{url} ({type(last_err).__name__}: {last_err})") from last_err
@@ -156,9 +182,9 @@ class KalshiSource:
     def _series_ticker(self, ticker: str) -> str:
         if ticker in self._series_cache:
             return self._series_cache[ticker]
-        market = self._get(f"/markets/{ticker}")["market"]
+        market = self._get(f"/markets/{urllib.parse.quote(ticker, safe='')}")["market"]
         event_ticker = market["event_ticker"]
-        event = self._get(f"/events/{event_ticker}")["event"]
+        event = self._get(f"/events/{urllib.parse.quote(event_ticker, safe='')}")["event"]
         series_ticker = event["series_ticker"]
         self._series_cache[ticker] = series_ticker
         return series_ticker
@@ -189,7 +215,15 @@ class KalshiSource:
         category — sports/politics/crypto/etc. are out of this adapter's
         scope, and silently returning them would misrepresent what
         KalshiSource covers. Unknown categories raise ValueError rather than
-        silently returning nothing."""
+        silently returning nothing.
+
+        `active` selects Kalshi's event-level status filter (see module
+        docstring): True -> 'open' (currently tradable), False -> 'settled'
+        (already resolved). A caller that needs both — e.g. the ingest entry
+        point, which needs settled markets' external_ids to reach
+        resolutions() — makes two calls, one per value; this method itself
+        never mixes the two so each call's result set has one unambiguous
+        status."""
         if category is not None and category not in CATEGORY_MAP:
             raise ValueError(
                 f"KalshiSource only covers {sorted(CATEGORY_MAP)} in the MVP "
@@ -197,7 +231,7 @@ class KalshiSource:
         wanted = [category] if category else list(CATEGORY_MAP)
         wanted_kalshi = {CATEGORY_MAP[c] for c in wanted}
 
-        status = "open" if active else None
+        status = "open" if active else "settled"
         rows: list[MarketRow] = []
         cursor = None
         while len(rows) < limit:
@@ -223,7 +257,8 @@ class KalshiSource:
 
     def orderbook(self, token_id: str) -> BookSnapshot:
         ticker, side = self._split_token(token_id)
-        data = self._get(f"/markets/{ticker}/orderbook")["orderbook_fp"]
+        data = self._get(
+            f"/markets/{urllib.parse.quote(ticker, safe='')}/orderbook")["orderbook_fp"]
         yes_levels = [(self._dollars(p), float(sz))
                       for p, sz in (data.get("yes_dollars") or [])]
         no_levels = [(self._dollars(p), float(sz))
@@ -247,10 +282,21 @@ class KalshiSource:
         if period not in PERIOD_MINUTES:
             raise ValueError(
                 f"period must be one of {sorted(PERIOD_MINUTES)}, got {period!r}")
+        _require_aware(start, "start")
+        _require_aware(end, "end")
         ticker, side = self._split_token(token_id)
         series_ticker = self._series_ticker(ticker)
+        # KNOWN GAP (WP-3 review, deferred): a single call here with no
+        # pagination or awareness of Kalshi's per-call candlestick cap — a
+        # wide `start`/`end` window at fine granularity (e.g. `period='1m'`
+        # over weeks) can silently return a truncated series rather than the
+        # full window. More involved to fix correctly (needs a paging loop
+        # keyed on the response's own bar count/cursor semantics) and lower
+        # value for the MVP's current backtest windows than the other review
+        # items; left as-is.
         data = self._get(
-            f"/series/{series_ticker}/markets/{ticker}/candlesticks",
+            f"/series/{urllib.parse.quote(series_ticker, safe='')}"
+            f"/markets/{urllib.parse.quote(ticker, safe='')}/candlesticks",
             start_ts=int(start.timestamp()), end_ts=int(end.timestamp()),
             period_interval=PERIOD_MINUTES[period],
         )
@@ -265,6 +311,12 @@ class KalshiSource:
                 # no trades in this bar (Kalshi's `price` fields are null
                 # when nothing traded) -- fall back to the yes bid/ask
                 # midpoint so a quiet bar doesn't just vanish from the series.
+                # KNOWN GAP (WP-3 review, deferred): if only one side of
+                # yes_bid/yes_ask is present, `mid()` below treats the
+                # missing side as 0 rather than a true one-sided mid (e.g. a
+                # bid-only book would understate the mid by half the true
+                # price) -- more involved to fix correctly and lower value
+                # for the MVP than the other review items; left as-is.
                 yb, ya = c.get("yes_bid") or {}, c.get("yes_ask") or {}
                 mid = lambda k: (
                     (self._dollars(yb.get(k)) or 0) + (self._dollars(ya.get(k)) or 0)

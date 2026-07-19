@@ -6,8 +6,13 @@ Standalone, no pytest dependency (repo convention:
 monkeypatches `urllib.request.urlopen` to route through recorded fixture
 responses under tests/fixtures/kalshi/ instead of hitting Kalshi's real API.
 Those fixtures were captured live on 2026-07-18 against
-https://api.elections.kalshi.com/trade-api/v2 (see ingest_kalshi.py's module
-docstring for the endpoints/shapes this pins) and trimmed to a few rows each
+https://external-api.kalshi.com/trade-api/v2 — Kalshi's documented
+*recommended* host (docs.kalshi.com/getting_started/api_environments) and
+this repo's DEFAULT_BASE_URL (see ingest_kalshi.py's module docstring for
+the endpoints/shapes this pins); confirmed live the same day that
+https://api.elections.kalshi.com/trade-api/v2, the older shared host,
+returns byte-identical responses for the same requests, so either host's
+capture would have pinned the same shapes — trimmed to a few rows each
 — the point is to freeze *real* Kalshi JSON shapes so KalshiSource's parsing
 is tested against ground truth, not a hand-rolled guess at the schema, while
 never touching the network in CI (plan.md WP-3 acceptance: "Integration test
@@ -94,8 +99,15 @@ def install_fixture_router(router):
 
 
 def default_router(path, query):
-    """Routes every endpoint KalshiSource calls to its recorded fixture."""
+    """Routes every endpoint KalshiSource calls to its recorded fixture.
+    /events is routed by its `status` query param, mirroring live Kalshi
+    behavior (confirmed live 2026-07-18): status='open' -> currently
+    tradable events (events_mixed.json), status='settled' -> already
+    resolved events (events_settled.json) -- see list_markets's active=True
+    -> 'open' / active=False -> 'settled' mapping in ingest_kalshi.py."""
     if path == "/events":
+        if query.get("status") == "settled":
+            return _load("events_settled.json")
         return _load("events_mixed.json")
     if path == "/markets/KXHIGHNY-26JUL19-T80":
         return _load("market_single.json")
@@ -192,6 +204,26 @@ def test_list_markets_respects_limit():
     finally:
         restore()
     check(len(rows) == 1, f"limit=1 should return exactly 1 row, got {len(rows)}")
+
+
+def test_list_markets_active_false_returns_settled():
+    """active=False must request Kalshi's 'settled' event status (not just
+    drop the filter) -- this is the seam run_kalshi_ingest.run() relies on
+    to source resolution data (see the WP-3 review blocker)."""
+    calls, restore = install_fixture_router(default_router)
+    try:
+        src = KalshiSource()
+        rows = src.list_markets(category="weather", limit=10, active=False)
+    finally:
+        restore()
+
+    check(len(rows) == 2, f"expected 2 settled weather markets, got {len(rows)}")
+    tickers = {r.external_id for r in rows}
+    check(tickers == {"KXHIGHNY-26JUL17-B85.5", "KXHIGHNY-26JUL17-T90"},
+          f"unexpected settled tickers: {tickers}")
+    check(("/events", {"with_nested_markets": "true", "status": "settled",
+                        "limit": "10"}) in calls,
+          f"list_markets(active=False) must query status='settled', got calls={calls}")
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +488,7 @@ def test_run_kalshi_ingest_main_returns_nonzero_on_api_failure():
         def __init__(self, *a, **kw):
             pass
 
-        def list_markets(self, *, category=None, limit=50):
+        def list_markets(self, *, active=True, category=None, limit=50):
             raise KalshiAPIError("simulated rate-limit exhaustion")
 
     orig_connect = store.connect
@@ -472,6 +504,72 @@ def test_run_kalshi_ingest_main_returns_nonzero_on_api_failure():
     check(rc == 1, f"main() should return 1 on KalshiAPIError, got {rc}")
 
 
+def test_run_kalshi_ingest_calls_apply_resolutions_with_real_data():
+    """WP-3 review blocker: run() used to call list_markets() with its
+    active=True default only (-> status='open'), so every external_id fed to
+    resolutions() belonged to an open market -- resolutions() correctly
+    filters those out (RESOLVED_STATUSES), so apply_resolutions was never
+    reached with real data on any actual run. That bug is invisible to a
+    test that calls resolutions() directly with hand-picked settled
+    tickers, bypassing run() entirely -- this test drives run() itself
+    end-to-end against a fixture set containing both open (events_mixed.json)
+    and settled (events_settled.json) markets and asserts apply_resolutions
+    is actually invoked with non-empty resolved rows."""
+    calls, restore = install_fixture_router(default_router)
+
+    applied: list = []
+    upserted_markets: list = []
+    market_ids: dict = {}
+
+    def fake_upsert_market(conn, market):
+        upserted_markets.append(market.external_id)
+        return market_ids.setdefault(market.external_id, len(market_ids) + 1)
+
+    def fake_upsert_outcomes(conn, market_id, outcomes):
+        pass
+
+    def fake_upsert_candles(conn, candles):
+        pass
+
+    def fake_apply_resolutions(conn, resolutions):
+        applied.extend(resolutions)
+
+    orig_upsert_market = store.upsert_market
+    orig_upsert_outcomes = store.upsert_outcomes
+    orig_upsert_candles = store.upsert_candles
+    orig_apply_resolutions = store.apply_resolutions
+    store.upsert_market = fake_upsert_market
+    store.upsert_outcomes = fake_upsert_outcomes
+    store.upsert_candles = fake_upsert_candles
+    store.apply_resolutions = fake_apply_resolutions
+    try:
+        src = KalshiSource()
+        n = run_kalshi_ingest.run(src, conn=None, category="weather", limit=10,
+                                  days=2, period="1h")
+    finally:
+        restore()
+        store.upsert_market = orig_upsert_market
+        store.upsert_outcomes = orig_upsert_outcomes
+        store.upsert_candles = orig_upsert_candles
+        store.apply_resolutions = orig_apply_resolutions
+
+    check("KXHIGHNY-26JUL19-T80" in upserted_markets,
+          f"open market from events_mixed.json should still be ingested, got {upserted_markets}")
+    check("KXHIGHNY-26JUL17-B85.5" in upserted_markets,
+          f"settled market from events_settled.json should also be ingested, got {upserted_markets}")
+    check(n == len(upserted_markets),
+          f"run() should return the count of markets actually ingested, got n={n}")
+
+    check(len(applied) > 0,
+          "apply_resolutions must be called with non-empty resolved rows when "
+          "the ingest window includes settled markets -- this reproduces the "
+          "WP-3 review blocker (open-only fetch starved resolutions())")
+    by_token = {r.outcome_token_id: r for r in applied}
+    check(by_token.get("KXHIGHNY-26JUL17-B85.5-YES") is not None
+          and by_token["KXHIGHNY-26JUL17-B85.5-YES"].resolved_value == 1.0,
+          f"expected the settled fixture's YES-win market resolved 1.0, got {by_token}")
+
+
 # ---------------------------------------------------------------------------
 def main() -> int:
     tests = [
@@ -480,6 +578,7 @@ def main() -> int:
         test_list_markets_no_category_returns_both,
         test_list_markets_unknown_category_raises_no_network,
         test_list_markets_respects_limit,
+        test_list_markets_active_false_returns_settled,
         test_orderbook_yes_side,
         test_orderbook_no_side_is_complement,
         test_candlesticks_yes_side_and_series_cache,
@@ -493,6 +592,7 @@ def main() -> int:
         test_graceful_degradation_on_repeated_5xx,
         test_graceful_degradation_on_429,
         test_run_kalshi_ingest_main_returns_nonzero_on_api_failure,
+        test_run_kalshi_ingest_calls_apply_resolutions_with_real_data,
     ]
     failures = 0
     for t in tests:

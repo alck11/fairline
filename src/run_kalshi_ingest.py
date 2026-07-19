@@ -5,13 +5,23 @@ candles, and resolutions into the store (WP-1's schema/upserts).
     python3 src/run_kalshi_ingest.py --category weather --days 14
     python3 src/run_kalshi_ingest.py --category economics --limit 20 --period 1h
 
-For every market `KalshiSource.list_markets()` returns: `store.upsert_market`
-+ `store.upsert_outcomes`, then `KalshiSource.candlesticks()` for each of its
-two outcomes over the trailing `--days` days at `--period` granularity ->
-`store.upsert_candles`, then one batched `KalshiSource.resolutions()` call
-over every external_id seen this run -> `store.apply_resolutions` (only
-markets that have actually settled produce rows — see
-KalshiSource.resolutions' docstring).
+Fetches markets in two passes — `KalshiSource.list_markets(active=True)`
+(currently open/tradable) and `list_markets(active=False)` (already
+settled) — and merges them (dedup by external_id; the two sets don't
+overlap in practice since Kalshi's event-level status is one-or-the-other).
+Fetching only the open side would starve resolutions() of any settled
+external_id to look up, since an open market has no result yet — this was a
+review-blocker bug (WP-3 CHANGES REQUESTED) that meant apply_resolutions was
+never reached with real data on any actual run.
+
+For every merged market: `store.upsert_market` + `store.upsert_outcomes`,
+then `KalshiSource.candlesticks()` for each of its two outcomes over the
+trailing `--days` days at `--period` granularity -> `store.upsert_candles`,
+then one batched `KalshiSource.resolutions()` call over every external_id
+seen this run -> `store.apply_resolutions` (only markets that have actually
+settled produce rows — see KalshiSource.resolutions' docstring; with the
+settled-side fetch above, that now includes real rows whenever the window
+covers any already-resolved market).
 
 Needs a real Postgres reachable via $DATABASE_URL (README -> "Database
 setup") and live network access to Kalshi's public API — no auth/API key.
@@ -36,7 +46,17 @@ def run(src: KalshiSource, conn, *, category: str, limit: int, days: int,
     whatever store.py raises on a genuine failure — callers (main() below)
     decide how to report it; this function does no printing of its own
     beyond per-market progress, so it stays easy to call from a test."""
-    markets = src.list_markets(category=category, limit=limit)
+    open_markets = src.list_markets(category=category, limit=limit, active=True)
+    settled_markets = src.list_markets(category=category, limit=limit, active=False)
+    # dedup by external_id, open-first: an open and a settled call should
+    # never return the same ticker (Kalshi's event-level status is
+    # one-or-the-other), but keying on a dict rather than concatenating
+    # keeps that assumption from silently double-ingesting if it ever
+    # doesn't hold.
+    markets_by_id = {m.external_id: m for m in settled_markets}
+    markets_by_id.update({m.external_id: m for m in open_markets})
+    markets = list(markets_by_id.values())
+
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
     external_ids = []
