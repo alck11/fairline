@@ -211,7 +211,14 @@ never touches `arb_opportunity` (CONTEXT.md → Signal). This is the only change
   degrade with a clear message and **non-zero exit** (US-2). The CLI layer has
   a backstop catch-all for any exception escaping `run()`. The leakage audit
   (US-7) exits non-zero on any lookahead. `place_live` keeps raising (ADR-0001).
-  Bad `prob_fn` output (p ∉ [0,1]) raises, as `ev_detector` already does.
+  Bad `prob_fn` output (`NaN` or p ∉ [0,1]) raises, as `ev_detector` already
+  does; the WP-4 harness applies the same NaN-or-range check per step before
+  `find_signal` ever sees `p`. `run_backtest`'s own numeric arguments
+  (`book_depth`, `bankroll`, `kelly_fraction`, `size_step`, `max_size`,
+  `min_ev`) are validated finite (the first five also positive) before the
+  replay starts — a `NaN` there would otherwise pass every downstream `<=`/`>`
+  comparison silently and defeat the exposure or Kelly cap it was meant to
+  enforce (2026-07-19 reviewer-round hardening pass).
 - **Configuration:** risk limits stay in the `RiskLimits` dataclass; fee
   coefficients stay module constants in `fees.py`; DB connection and Kalshi API
   base/rate-limit from environment variables (documented in README); backtest

@@ -242,7 +242,22 @@ historical depth (ADR-0006); one position per outcome, held to resolution;
 only outcomes with a stored resolution are replayed (their value is used
 strictly at settlement, never at entry); every Kalshi fee uses the 0.07
 coefficient (architect ruling 2026-07-18 — understates edge, the safe
-direction). Demo (`python3 src/backtest.py`) seeds a synthetic market and
+direction).
+
+**Input validation (review-round hardening):** every numeric sizing/fee
+argument to `run_backtest` (`book_depth`, `bankroll`, `kelly_fraction`,
+`size_step`, `max_size`) is checked finite-and-positive before the replay
+starts; `min_ev` is checked finite only (it may legitimately be `<= 0` as a
+deliberate stress test of the EV cutoff). A `NaN` in any of the first five
+defeats Python's own comparison operators (`nan <= 0` and `nan > cap` both
+evaluate `False`, and `min(cap, nan) == cap`, not `nan`), which would
+otherwise silently and permanently disable the `max_open_exposure` risk cap
+or bypass the Kelly cap rather than raising. `prob_fn` output is likewise
+range-checked per step: `NaN` or a value outside `[0,1]` raises immediately
+(naming the outcome/`as_of`); an exact `0.0`/`1.0` is treated as "market
+decided" and skipped, not traded.
+
+Demo (`python3 src/backtest.py`) seeds a synthetic market and
 needs `$DATABASE_URL`; tests need no provisioning:
 ```
 .venv/bin/python tests/test_risk_execution_signal.py   # Engine gates, no DB

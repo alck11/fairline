@@ -152,7 +152,7 @@ fairline/
 │   ├── run_kalshi_ingest.py  # CLI entry point
 │   ├── prob_fn.py            # Model interface (WP-2, ADR-0009)
 │   ├── backtest.py           # Backtest harness (WP-4)
-│   ├── ev_detector.py        # EV/Kelly math (parked)
+│   ├── ev_detector.py        # EV/Kelly math (MVP-primary, ADR-0005)
 │   ├── risk_execution.py     # Paper engine (WP-4)
 │   ├── fees.py               # Fee models
 │   └── ...
