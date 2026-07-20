@@ -20,6 +20,25 @@ Domain language lives in [CONTEXT.md](CONTEXT.md); decisions in
 [docs/architecture/overview.md](docs/architecture/overview.md) and the live
 [implementation plan](docs/architecture/plan.md).
 
+## Professional Tooling
+
+This project includes a complete professional development setup:
+
+| Tool | Purpose | Quick Start |
+|------|---------|-------------|
+| **ruff** | Linting + formatting (E, W, F, I, B, SIM, etc.) | `make lint`, `make format` |
+| **mypy** | Static type checking (Python 3.12+) | `make type-check` |
+| **pytest** | Unit + integration testing (fixture-based, no network in CI) | `make test` |
+| **pre-commit** | Automated checks on git commit | `make pre-commit-install` |
+| **bandit** | Security scanning | `make security-check` |
+| **pytest-cov** | Code coverage reporting | `make coverage` |
+| **black** | Code formatter (ruff is primary) | `make format` |
+| **GitHub Actions** | CI/CD on every push | `.github/workflows/ci.yml` |
+
+Configuration: `pyproject.toml` (single source of truth), `.pre-commit-config.yaml`, `Makefile`
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow and code style guide.
+
 ## Blocks
 
 | File | Block | What it does |
@@ -41,11 +60,30 @@ Domain language lives in [CONTEXT.md](CONTEXT.md); decisions in
 
 ## Setup
 
+### Quick Start (recommended)
+```bash
+make setup       # One-time: creates .venv, installs all dependencies
+source .venv/bin/activate
+python src/store.py          # Demo any module
 ```
-python3.12 -m venv .venv
+
+### Manual Setup
+```bash
+python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python src/<file>.py
 ```
+
+### Development Setup
+```bash
+make setup          # Creates .venv, installs prod + dev dependencies
+make lint           # Auto-fix linting issues
+make type-check     # Run type checker
+make test           # Run tests
+make pre-commit-install  # Install git pre-commit hooks
+```
+
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for full development guide.
 
 ## Database setup
 
@@ -111,6 +149,30 @@ convention `store.py`'s own demo/tests already use). NO-side candles/orderbook
 levels are derived as the complement of the YES side (Kalshi's yes+no≈1
 pricing), documented inline in `ingest_kalshi.py`.
 
+**Data validation (2026-07-19 hardening pass):**
+Every parser validates required fields and numeric ranges before constructing
+a row:
+
+- **Null/empty field checks:** `_parse_market()` and `resolutions()` now
+  validate `ticker` is present; `orderbook()` validates every level's
+  `price` is non-null; `candlesticks()` validates every `price_dollars` field
+  before using it. Any missing identifier or required field raises
+  `KalshiAPIError` (not `KeyError` or `TypeError` downstream).
+- **OHLC range validation:** `candlesticks()` enforces `[0, 1]` range for all
+  price fields — both the primary `open/high/low/close_dollars` fields and
+  any fallback values computed from `yes_bid`/`yes_ask` midpoints (for bars
+  with no trades). A price outside [0, 1] raises `KalshiAPIError` immediately
+  rather than flowing through to a silent CHECK constraint violation in
+  Postgres.
+- **Pagination guards:** `list_markets()` cannot hang on a stuck cursor — it
+  enforces a hard page cap (min 50, scaled by limit) and detects non-advancing
+  cursors (exact repeat or previously-seen value) within 1–2 pages, raising
+  `KalshiAPIError` with details instead of spinning forever.
+- **CLI-level backstop:** `run_kalshi_ingest.py` catches any exception
+  escaping `run()` (not just `KalshiAPIError`), prints a clearly-labeled
+  "unexpected error" message + traceback to stderr, and exits 1 — preventing
+  bare tracebacks from untested future API changes.
+
 Run the demo (network required, no database, no auth) to see it against live
 data:
 ```
@@ -133,7 +195,10 @@ transient (429/5xx) failures with backoff first.
 **Tests are fixture-based, no live network:**
 `tests/test_ingest_kalshi.py` monkeypatches `urllib.request.urlopen` to
 replay real Kalshi responses recorded under `tests/fixtures/kalshi/`
-(captured live 2026-07-18) — no network call happens when running the suite:
+(captured live 2026-07-18), with comprehensive regression tests for the
+validation hardening (round-6 acceptance suite): null/empty fields, OHLC
+out-of-range, pagination hangs, and yes_bid/yes_ask fallback correctness —
+no network call happens when running the suite:
 ```
 .venv/bin/python tests/test_ingest_kalshi.py
 ```

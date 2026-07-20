@@ -1,0 +1,24 @@
+# Development and testing dependencies
+# Usage: pip install -r requirements.txt -r requirements-dev.txt
+# Or:    pip install -e ".[dev]"
+
+# Linting and code quality
+ruff>=0.5.0                  # Fast Python linter + formatter (replaces flake8/pylint/black/isort)
+mypy>=1.11.0                 # Static type checker
+black>=24.4.0                # Code formatter (used with ruff in dual-mode for compatibility)
+isort>=5.13.0                # Import sorting (used with ruff in dual-mode)
+
+# Testing
+pytest>=8.0.0                # Test framework
+pytest-cov>=5.0.0            # Coverage plugin for pytest
+pytest-xdist>=3.6.0          # Parallel test execution
+pgserver>=0.11.0             # Throwaway local Postgres (optional, for tests only)
+
+# Pre-commit hooks
+pre-commit>=3.7.0            # Git hooks framework for running checks before commit
+
+# Security scanning
+bandit>=1.7.5                # Security issue scanner
+
+# Utilities
+python-dotenv>=1.0.0         # .env file support

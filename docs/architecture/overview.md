@@ -203,10 +203,15 @@ never touches `arb_opportunity` (CONTEXT.md → Signal). This is the only change
 
 ## Cross-cutting policy
 
-- **Error handling:** fail loud, never silently no-op. Ingestion degrades on
-  API/rate-limit failure with a clear message and **non-zero exit** (US-2). The
-  leakage audit (US-7) exits non-zero on any lookahead. `place_live` keeps raising
-  (ADR-0001). Bad `prob_fn` output (p ∉ [0,1]) raises, as `ev_detector` already does.
+- **Error handling:** fail loud, never silently no-op. Ingestion validates all
+  required fields and numeric constraints before constructing rows (WP-3
+  2026-07-19 hardening pass: null/empty fields, OHLC [0,1] range, pagination
+  hang guards, yes_bid/yes_ask fallback correctness). Bad data raises
+  `KalshiAPIError` with context, not bare tracebacks. API/rate-limit failures
+  degrade with a clear message and **non-zero exit** (US-2). The CLI layer has
+  a backstop catch-all for any exception escaping `run()`. The leakage audit
+  (US-7) exits non-zero on any lookahead. `place_live` keeps raising (ADR-0001).
+  Bad `prob_fn` output (p ∉ [0,1]) raises, as `ev_detector` already does.
 - **Configuration:** risk limits stay in the `RiskLimits` dataclass; fee
   coefficients stay module constants in `fees.py`; DB connection and Kalshi API
   base/rate-limit from environment variables (documented in README); backtest

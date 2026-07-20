@@ -1,6 +1,14 @@
 # Ingestion sits behind a MarketSource interface; KalshiSource is the first real backend
 
-> **Updated 2026-07-17 for the Kalshi pivot.** The interface decision stands; the
+> **Updated 2026-07-19 for validation hardening.** The interface and splits stand.
+> `KalshiSource` now includes comprehensive data validation: all required fields
+> (ticker, outcome ids, prices) and numeric ranges (OHLC ∈ [0,1]) are checked
+> before row construction; any malformation raises `KalshiAPIError` with context
+> rather than propagating bare exceptions downstream. Pagination has explicit
+> hang guards (max-page cap + non-advancing cursor detection). The CLI layer has
+> a backstop catch-all for any exception escaping the run path.
+>
+> **Earlier update (2026-07-17 for the Kalshi pivot).** The interface decision stands; the
 > *first real backend* changes. `KalshiSource` (Kalshi public REST/WS) is now the
 > MVP's data adapter, **superseding the polymarket-cli path** as the live source.
 > The polymarket-cli backend stays in-repo (parked). This update also records two
@@ -38,6 +46,16 @@ Protocol bundled venue-neutral market data (`list_markets`, `orderbook`,
 raise `NotImplementedError("Kalshi exposes no public per-trader feed")`. The full
 `MarketSource` (with wallet methods) remains the interface the parked polymarket-cli
 backend satisfies. No consumer of the old Protocol breaks.
+
+**Split 3 — fail loud in KalshiSource itself (validation).** Every parser validates
+required fields and numeric constraints before constructing a row. Null/empty
+identifiers (ticker, outcome ids), out-of-range prices (OHLC ∉ [0,1]), and
+pagination anomalies raise `KalshiAPIError` with context — not `KeyError`/`TypeError`
+downstream, not silent success flowing into Postgres CHECK constraints. The CLI
+layer (`run_kalshi_ingest.py`) has a broader backstop catch-all for any exception
+escaping `run()`, printing clearly-labeled "unexpected error" messages + traceback
+to stderr instead of bare tracebacks. This design ensures bad data never silently
+propagates and future untested field changes cannot escape as uncaught exceptions.
 
 New row dataclasses in `ingest.py` (shaped for `schema/002_kalshi_ev.sql`,
 ADR-0010): `Candle` → `candlestick`, `ResolutionRow` → `market`/`outcome`

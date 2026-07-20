@@ -1,6 +1,53 @@
+# Virtual environments
 .venv/
+venv/
+env/
+ENV/
+.env
+
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+*.cover
+.coverage.*
+
+# Type checking and linting
+.mypy_cache/
+.ruff_cache/
+.pylint.d/
+*.pyi
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 .DS_Store
+*.iml
+
+# Project-specific
 .pgserver-test-data/
 tests/.pgserver-test-data*/
+
+# Temporary files
+*.tmp
+*.bak
+.tmp/
+tmp/

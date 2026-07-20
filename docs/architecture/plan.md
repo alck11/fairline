@@ -97,7 +97,10 @@ repo convention (`python3 tests/<file>.py`, no pytest dependency).
 2. **Scope.** Add `MarketDataSource` Protocol + `Candle`/`ResolutionRow` dataclasses
    to `src/ingest.py`. New `src/ingest_kalshi.py` (`KalshiSource`). An ingest
    entry-point/script that pulls weather+econ markets, candles, trades, resolutions
-   into the store (via WP-1). README ingestion section.
+   into the store (via WP-1). Comprehensive data validation (null/empty fields, OHLC
+   [0,1] range, pagination hang guards, yes_bid/yes_ask fallback correctness) that
+   raises `KalshiAPIError` on malformed data rather than silently succeeding or
+   raising bare tracebacks. README ingestion section.
 3. **Inputs.** `src/ingest.py` (existing Protocol/row types); `store.py` upserts
    (WP-1); Kalshi public REST/WS API (no trading auth). Do **not** populate
    `market.fee_rate` (schema/001): Kalshi fees are computed at call time by
@@ -118,8 +121,13 @@ repo convention (`python3 tests/<file>.py`, no pytest dependency).
 5. **Acceptance (US-2 G/W/T).** A documented backtest window of real Kalshi
    weather/econ markets loads with resolved outcomes and **no manual patching**;
    the adapter exits non-zero with a clear error on API/rate-limit failure; **no
-   trading/execution code is present** (data only). Integration test runs against
-   recorded fixture responses (no live network in CI).
+   trading/execution code is present** (data only). All required fields (ticker,
+   outcome token ids, prices) and numeric ranges (OHLC ∈ [0,1]) are validated
+   before row construction, raising `KalshiAPIError` on any malformation.
+   Pagination cannot hang (max-page cap + non-advancing cursor detection).
+   Integration tests run against recorded fixture responses (no live network in CI)
+   including comprehensive validation regression cases (null fields, out-of-range
+   prices, pagination anomalies, fallback correctness).
 6. **Boundaries.** Do **not** implement order placement or any auth'd/trading
    endpoint. Do **not** touch `ingest_polymarket_cli.py` (parked) or the full
    `MarketSource` Protocol's existing methods. Do **not** compute EV/sizing here.
