@@ -50,13 +50,15 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow and code style g
 | `src/ingest_polymarket_cli.py` | Ingestion (backend) · PARKED | First `MarketSource` impl: shells out to the official [polymarket-cli](https://github.com/Polymarket/polymarket-cli) (`-o json`, no-auth public data). Install the Rust binary and put `polymarket` on PATH (or set `$POLYMARKET_CLI`). |
 | `src/ingest_kalshi.py` | Ingestion (backend) · MVP data adapter | `KalshiSource`: `MarketDataSource` over Kalshi's **public** trade-api v2 (weather + econ, no auth, free — ADR-0006, WP-3). `wallet_trades`/`leaderboard` raise `NotImplementedError` (Kalshi has no public per-trader feed). Data only — no order placement. |
 | `src/run_kalshi_ingest.py` | Ingestion (entry point) | CLI that pulls Kalshi weather/econ markets + candles + resolutions via `KalshiSource` into the store (`store.py`, WP-1/WP-3). See "Kalshi ingestion" below. |
+| `src/prob_fn.py` | Model interface (WP-2) | The `ProbFn` contract (ADR-0009): `prob_fn(MarketRef, as_of) -> p ∈ [0,1]`, point-in-time guaranteed via `store.py`'s PIT readers. Ships `MidpriceProbFn` (placeholder **and** US-6 baseline) and `ClimatologyProbFn`. |
+| `src/backtest.py` | Backtest harness (WP-4) | `run_backtest(conn, prob_fn, ...)`: replays stored Kalshi candles step-by-step, binds `p = prob_fn(ref, as_of)` into `ev_detector.find_signal`, executes through the paper `Engine` under all risk gates, settles hold-to-resolution, and persists signals + results (US-5). See "EV backtest harness" below. |
 | `src/ev_detector.py` | Directional (MVP-primary) | Model-vs-price EV betting: post-fee EV/share, depth-aware sizing, quarter-Kelly cap. Probability supplied via the `prob_fn(market, as_of)` contract (ADR-0009). Paper-first (ADR-0001, ADR-0005). |
 | `src/fees.py` | Fee math | Polymarket V2 taker formula `rate·p·(1−p)` (maker-free) + Kalshi per-order rounded fee. The single source of truth every other module imports. |
 | `src/detector.py` | Detection · PARKED | Fee-aware edge for complete-set / cross-venue arb, plus depth-aware sizing that walks the book to find the profit-*maximizing* size after slippage. |
 | `src/wallet_features.py` | Scoring (features) · PARKED | Point-in-time, leakage-safe features (fee-adjusted PnL, Sharpe, drawdown, recency PnL, category HHI, loss streaks, dominant category + share) + a transparent percentile composite score. |
 | `src/wallet_scoring.py` | Scoring (model) · PARKED | Forward-label construction, purged time-series CV, XGBoost training, and category-scoped basket construction (top-k specialists within a category, gated on score + category concentration, ADR-0007). Beats-the-baseline gate before you trust it. |
 | `src/market_matcher.py` | Matching · PARKED | Triage-only routing: local Ollama embeddings discard the unrelated or escalate everything else; only Claude (reading both resolution rule-sets) or a human ever writes a link (ADR-0002). |
-| `src/risk_execution.py` | Execution + risk | Paper-trade engine with notional/exposure/wallet caps, daily-loss kill switch, basket-consensus gate, and atomic both-legs-or-neither arb handling. |
+| `src/risk_execution.py` | Execution + risk | Paper-trade engine with notional/exposure/wallet caps, daily-loss kill switch, basket-consensus gate, atomic both-legs-or-neither arb handling, and `execute_signal` routing directional Signals through the same gates (WP-4). |
 
 ## Setup
 
@@ -201,6 +203,50 @@ out-of-range, pagination hangs, and yes_bid/yes_ask fallback correctness —
 no network call happens when running the suite:
 ```
 .venv/bin/python tests/test_ingest_kalshi.py
+```
+
+## EV backtest harness (WP-4)
+
+`src/backtest.py` replays ingested Kalshi history through the directional-EV
+strategy and the paper `Engine`, producing hold-to-resolution realized PnL:
+
+```python
+from datetime import datetime, timedelta, timezone
+import store
+from backtest import run_backtest
+from prob_fn import MidpriceProbFn, StoreReader
+from risk_execution import RiskLimits
+
+conn = store.connect()
+summary = run_backtest(
+    conn, MidpriceProbFn(StoreReader(conn)),   # any ADR-0009 ProbFn drops in
+    category="weather",
+    start=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    end=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    step=timedelta(hours=1),
+    limits=RiskLimits(), run_id="my-run")
+```
+
+Per `as_of` step it prices each outcome off the last candle **strictly before**
+`as_of` (PIT enforced in SQL by `store.candles_before` — ADR-0009), resolves
+`p = prob_fn(MarketRef, as_of)`, sizes via `ev_detector.find_signal`
+(quarter-Kelly, post-Kalshi-fee), and executes through
+`Engine.execute_signal` under the notional/exposure caps and kill switch.
+Signals persist to `directional_signal` at decision time (even when the
+Engine rejects them — that's the audit trail); settled positions persist to
+`backtest_result`, and the summary's total PnL reconciles to their sum.
+
+Deliberate MVP assumptions, each recorded in `backtest_run.params`: a
+synthesized one-level book (`book_depth`) since Kalshi publishes no
+historical depth (ADR-0006); one position per outcome, held to resolution;
+only outcomes with a stored resolution are replayed (their value is used
+strictly at settlement, never at entry); every Kalshi fee uses the 0.07
+coefficient (architect ruling 2026-07-18 — understates edge, the safe
+direction). Demo (`python3 src/backtest.py`) seeds a synthetic market and
+needs `$DATABASE_URL`; tests need no provisioning:
+```
+.venv/bin/python tests/test_risk_execution_signal.py   # Engine gates, no DB
+.venv/bin/python tests/test_backtest.py                # end-to-end, pgserver fallback
 ```
 
 ## Suggested build order (MVP — see [plan.md](docs/architecture/plan.md))

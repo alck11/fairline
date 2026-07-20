@@ -147,6 +147,35 @@ class Engine:
         self.state.wallet_alloc[wallet] = self.state.wallet_alloc.get(wallet, 0.0) + notional
         return self._record("filled", [f], 0.0, f"copy of {wallet}")
 
+    # -- directional execution (WP-4) ----------------------------------------
+    def execute_signal(self, signal, *, category: str) -> dict:
+        """Route a DirectionalSignal through the same gates as every other
+        entry: `_check` (kill switch, per-trade notional cap, open-exposure
+        cap) then `_fill`, recording to the blotter. Never writes
+        arb_opportunity — a directional Signal is not an Opportunity
+        (CONTEXT.md). No wallet dimension: the per-wallet allocation cap is
+        copy-trade-specific, so `_check` runs with wallet=None.
+
+        Entry-time realized PnL is 0.0, exactly like execute_copy — a
+        directional position's PnL is realized at resolution via `settle()`
+        (hold-to-resolution, CONTEXT.md), not at entry. `signal` is any
+        object with token_id/venue/price/size/p_model/ev_per_share fields
+        (ev_detector.DirectionalSignal; duck-typed so this module keeps not
+        importing ev_detector)."""
+        leg = {"venue": signal.venue, "token_id": signal.token_id,
+               "side": "buy", "price": signal.price, "size": signal.size,
+               "category": category}
+        notional = signal.price * signal.size
+        ok, why = self._check(notional, wallet=None)
+        if not ok:
+            return self._record("rejected", [leg], 0.0, why)
+        f = self._fill(leg)
+        self.state.open_exposure += notional
+        return self._record(
+            "filled", [f], 0.0,
+            f"directional {signal.token_id} p={signal.p_model:.3f} "
+            f"ev/share={signal.ev_per_share:+.3f}")
+
     def settle(self, pnl: float):
         """Call when a position resolves; trips kill switch past the loss limit."""
         self.state._roll_day(self.mode)
