@@ -56,6 +56,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow and code style g
 | `src/backtest.py` | Backtest harness (WP-4) | `run_backtest(conn, prob_fn, ...)`: replays stored Kalshi candles step-by-step, binds `p = prob_fn(ref, as_of)` into `ev_detector.find_signal`, executes through the paper `Engine` under all risk gates, settles hold-to-resolution, and persists signals + results (US-5). See "EV backtest harness" below. |
 | `src/report.py` | Backtest report (WP-5) | `build_report(conn, run_id, baseline_run_id)`: post-fee PnL/ROI, hit rate, Brier, per-trade Sharpe, max drawdown and a per-market breakdown for a model run **and** the baseline run, plus the headline — model net ROI − baseline net ROI as one number (US-6). Reads only stored tables; no re-ingest, no re-run. |
 | `src/audit.py` | Leakage audit (WP-5) | `audit_run(conn, run_id)`: independently re-derives each signal's point-in-time price (`ts < as_of`, its own SQL — not `store`'s reader) and fails on any decision priced off a candle at/after `as_of`; CLI exits non-zero on a violation (US-7). The backtest's definition-of-done gate. |
+| `src/calibration.py` | Edge-room GO/NO-GO study (WP-7) | `run_study(conn, ...)`: scores a naive, non-trained forecast→probability benchmark against Kalshi's price by Brier skill, per market type (ADR-0012). GO if the public forecast is more accurate than the price by a pre-registered margin (default 5%), else NO-GO — the gate for WP-8. PIT-honest; market specs parsed from stored rules; fee-free (edge room, not net edge). |
+| `src/run_calibration.py` | Calibration (entry point) | CLI running the WP-7 study over stored tables; prints the per-type verdict and maps it to an exit code (0=GO, 2=NO-GO, 1=error). See "Calibration study" below. |
 | `src/ev_detector.py` | Directional (MVP-primary) | Model-vs-price EV betting: post-fee EV/share, depth-aware sizing, quarter-Kelly cap. Probability supplied via the `prob_fn(market, as_of)` contract (ADR-0009). Paper-first (ADR-0001, ADR-0005). |
 | `src/fees.py` | Fee math | Polymarket V2 taker formula `rate·p·(1−p)` (maker-free) + Kalshi per-order rounded fee. The single source of truth every other module imports. |
 | `src/detector.py` | Detection · PARKED | Fee-aware edge for complete-set / cross-venue arb, plus depth-aware sizing that walks the book to find the profit-*maximizing* size after slippage. |
@@ -258,6 +260,46 @@ replays real IEM responses recorded under `tests/fixtures/iem/` (captured live
 filtering, malformed-response handling, and idempotent re-run:
 ```
 .venv/bin/python tests/test_weather_ingest.py
+```
+
+## Calibration study — edge-room GO/NO-GO gate (WP-7)
+
+`src/calibration.py` answers the one question that gates the expensive weather
+model (WP-8): **does Kalshi's weather price already track the public forecast, or
+is there room for a forecast-based model to beat it?** It builds a *naive,
+non-trained* forecast→probability benchmark and scores it against the market price
+by **Brier skill**, per market type (ADR-0012):
+
+- **The benchmark:** the forecast daily-high for the target date (max of hourly MOS
+  `tmpf` from the latest cycle strictly before `as_of`), mapped through a Gaussian
+  whose error mean/σ come from the station's **point-in-time** forecast-vs-observation
+  history (only pairs knowable before `as_of`). P(YES) follows from the strike
+  (`less`/`greater`/`between`) via the normal CDF. It is deliberately crude — a lower
+  bound on edge room, *not* WP-8's model.
+- **Market specs are parsed, not stored:** `(station, variable, target_date,
+  strike_type, lo/hi)` come from the stored ticker + `resolution_text` (Kalshi's
+  rules are unambiguous ground truth); an unparseable market is skipped, never
+  guessed. WP-3 didn't persist the strike fields and backtest.py defers `params` to
+  WP-8 — so WP-7 parses without touching Track A.
+- **The verdict:** per type, `skill = (Brier_price − Brier_forecast) / Brier_price`;
+  **GO** if `skill ≥ margin` (default 0.05), else **NO-GO** — a valid, capital-saving
+  outcome that stops Track B before WP-8. Fee-free by design (edge *room*, not net
+  profitability — that's the WP-4/WP-5 backtest).
+
+```
+.venv/bin/python src/run_calibration.py --start 2026-06-01 --end 2026-07-01 --step-hours 12
+```
+Reads only stored tables, point-in-time honest via `store.py`'s `< as_of` readers.
+Exit code encodes the verdict for scripting (0=GO, 2=NO-GO, 1=error). Degrades
+gracefully if Postgres is unavailable — never a bare traceback.
+
+**Tests are synthetic + fixture-based, no network/DB:** `tests/test_calibration.py`
+checks the spec parser against the **real** Kalshi `rules_primary` strings, the
+`less`/`greater`/`between` probability math, PIT honesty (a forecast issued after
+the window never changes the verdict), and both a **seeded GO** and a **seeded
+NO-GO**:
+```
+.venv/bin/python tests/test_calibration.py
 ```
 
 ## EV backtest harness (WP-4)

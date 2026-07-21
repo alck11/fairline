@@ -252,17 +252,28 @@ repo convention (`python3 tests/<file>.py`, no pytest dependency).
    public forecasts — i.e. whether there is edge room worth a model. Serves **US-4
    (study)**. **This is the GO/NO-GO gate for WP-8.**
 2. **Scope.** New `src/calibration.py` — align Kalshi weather candles (WP-3) to
-   NOAA/NWS forecasts (WP-6) at matching `as_of`, measure how closely price tracks
-   the forecast-implied probability and the residual (lag/miss).
-3. **Inputs.** `candlestick`, `weather_forecast`, `weather_observation` (WP-1/3/6);
-   PIT readers (WP-1) — the study itself must be point-in-time honest.
-4. **Outputs / signatures.** `calibration.run_study(store, *, category='weather',
-   window) -> CalibrationReport` reporting, per market type, price-vs-forecast
-   tracking and the residual, and a **clear GO/NO-GO signal** ("Kalshi prices lag
-   public forecasts by X on type Y → edge room" vs "already efficient → no room").
-5. **Acceptance (US-4 G/W/T).** Outputs a clear per-market-type GO/NO-GO; a NO-GO is
-   a **valid, non-blocking** outcome that stops Track B before WP-8. Uses only
-   pre-`as_of` forecast data (same PIT discipline as the backtest).
+   NOAA/NWS forecasts (WP-6) at matching `as_of`, and score a **naive, non-trained**
+   forecast→probability benchmark against the market price. Criterion (**ADR-0012**):
+   edge room = the naive forecast is more *accurate* than the price by Brier skill.
+   Market specs `(station, variable, target_date, strike_type, lo/hi)` are **parsed**
+   from stored ticker + `resolution_text` (ground truth) — not stored structurally
+   (backtest.py sets `MarketRef.params={}`, "WP-8's concern"); WP-7 parses without
+   touching Track A. `src/run_calibration.py` is the CLI (verdict → exit code
+   0=GO / 2=NO-GO).
+3. **Inputs.** `candlestick`, `weather_forecast`, `weather_observation`, `market`
+   (WP-1/3/6); PIT readers via `prob_fn.Reader`/`StoreReader` (WP-1/2) — the study
+   itself is point-in-time honest.
+4. **Outputs / signatures.** `calibration.run_study(conn, *, category='weather',
+   start, end, step, margin=0.05, min_error_pairs=10) -> CalibrationReport`
+   reporting, per market type, `Brier(price)` vs `Brier(forecast)`, relative skill,
+   the mean price↔forecast gap and lead time, and a **clear GO/NO-GO** ("edge room
+   on type Y" vs "no room → stop"). Pure core `evaluate(reader, markets, ...)` is
+   reader-based for fixtureless testing.
+5. **Acceptance (US-4 G/W/T).** Outputs a clear per-market-type GO/NO-GO (both a
+   seeded GO and a seeded NO-GO are verified); a NO-GO is a **valid, non-blocking**
+   outcome that stops Track B before WP-8. Uses only pre-`as_of` data (verified: a
+   forecast issued after the window never changes the verdict); fee-free (edge room,
+   not net profitability — that is WP-4/WP-5).
 6. **Boundaries.** Do **not** build the predictive model (WP-8) — this only measures
    edge *room*. Do **not** gate Track A on the result (A proves plumbing on the
    placeholder regardless).
@@ -303,7 +314,7 @@ repo convention (`python3 tests/<file>.py`, no pytest dependency).
 | WP-4 | A3 | US-5 | 0005, 0009 | WP-1, WP-2, WP-3 |
 | WP-5 | A4 | US-6, US-7 | 0009, 0003(principle) | WP-1, WP-4 |
 | WP-6 | B1 | US-4(data) | 0010, 0011 | WP-1, WP-3 |
-| WP-7 | B2 | US-4(study) | 0009 | WP-3, WP-6 |
+| WP-7 | B2 | US-4(study) | 0009, 0012 | WP-3, WP-6 |
 | WP-8 | B3 | US-3(real) | 0009, 0005 | WP-2, WP-6, WP-7=GO |
 
 **Critical path:** WP-1 → WP-2 → WP-3 → WP-4 → WP-5 (~16–27 dev-days, proven on the
