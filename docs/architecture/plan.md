@@ -197,7 +197,10 @@ repo convention (`python3 tests/<file>.py`, no pytest dependency).
      **headline = model net ROI − baseline net ROI as one number**; reproducible
      from stored tables without re-ingest.
    - `audit.audit_run(store, run_id) -> AuditResult`; **exits non-zero** on any
-     signal whose `as_of`/price/forecast input drew on data timestamped `>= as_of`.
+     signal whose recorded price drew on a candlestick timestamped `>= as_of`
+     (price-surface PIT re-derivation). `p_model`/forecast PIT-honesty is enforced
+     by construction via the store's `< as_of` readers, and audited per-model
+     in WP-8.
 5. **Acceptance (US-6/US-7 G/W/T).** Report headline is one number (model minus
    baseline net ROI), reproducible from tables; audit fails loudly (non-zero exit)
    on a seeded lookahead violation and passes on a clean run. The audit is part of

@@ -52,6 +52,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow and code style g
 | `src/run_kalshi_ingest.py` | Ingestion (entry point) | CLI that pulls Kalshi weather/econ markets + candles + resolutions via `KalshiSource` into the store (`store.py`, WP-1/WP-3). See "Kalshi ingestion" below. |
 | `src/prob_fn.py` | Model interface (WP-2) | The `ProbFn` contract (ADR-0009): `prob_fn(MarketRef, as_of) -> p ∈ [0,1]`, point-in-time guaranteed via `store.py`'s PIT readers. Ships `MidpriceProbFn` (placeholder **and** US-6 baseline) and `ClimatologyProbFn`. |
 | `src/backtest.py` | Backtest harness (WP-4) | `run_backtest(conn, prob_fn, ...)`: replays stored Kalshi candles step-by-step, binds `p = prob_fn(ref, as_of)` into `ev_detector.find_signal`, executes through the paper `Engine` under all risk gates, settles hold-to-resolution, and persists signals + results (US-5). See "EV backtest harness" below. |
+| `src/report.py` | Backtest report (WP-5) | `build_report(conn, run_id, baseline_run_id)`: post-fee PnL/ROI, hit rate, Brier, per-trade Sharpe, max drawdown and a per-market breakdown for a model run **and** the baseline run, plus the headline — model net ROI − baseline net ROI as one number (US-6). Reads only stored tables; no re-ingest, no re-run. |
+| `src/audit.py` | Leakage audit (WP-5) | `audit_run(conn, run_id)`: independently re-derives each signal's point-in-time price (`ts < as_of`, its own SQL — not `store`'s reader) and fails on any decision priced off a candle at/after `as_of`; CLI exits non-zero on a violation (US-7). The backtest's definition-of-done gate. |
 | `src/ev_detector.py` | Directional (MVP-primary) | Model-vs-price EV betting: post-fee EV/share, depth-aware sizing, quarter-Kelly cap. Probability supplied via the `prob_fn(market, as_of)` contract (ADR-0009). Paper-first (ADR-0001, ADR-0005). |
 | `src/fees.py` | Fee math | Polymarket V2 taker formula `rate·p·(1−p)` (maker-free) + Kalshi per-order rounded fee. The single source of truth every other module imports. |
 | `src/detector.py` | Detection · PARKED | Fee-aware edge for complete-set / cross-venue arb, plus depth-aware sizing that walks the book to find the profit-*maximizing* size after slippage. |
@@ -262,6 +264,51 @@ needs `$DATABASE_URL`; tests need no provisioning:
 ```
 .venv/bin/python tests/test_risk_execution_signal.py   # Engine gates, no DB
 .venv/bin/python tests/test_backtest.py                # end-to-end, pgserver fallback
+```
+
+## Fee-aware report + leakage audit (WP-5)
+
+Two read-only modules turn a stored run into a verdict. Neither re-ingests or
+re-runs the harness — they read the tables WP-4 populated, so a report and its
+audit reproduce from a database snapshot alone.
+
+`src/report.py` — the answer to the one question the MVP exists to answer:
+
+```python
+from report import build_report, format_report
+
+report = build_report(conn, "my-model-run", "my-baseline-run")
+print(format_report(report))
+print(report.headline_net_roi_delta)   # model net ROI − baseline net ROI
+```
+
+Per run it reports net (post-Kalshi-fee) PnL, ROI (denominator = notional =
+cost-to-enter, CONTEXT.md), hit rate, Brier of `p_model`, per-trade
+(unannualized) Sharpe, max drawdown, and a per-market breakdown that sums back
+to the run total. The **headline is one number**: model net ROI − baseline net
+ROI. The `MidpriceProbFn` baseline (`p_model = price`) is −EV after fees so it
+never trades — ROI 0.0 by the zero-notional convention — and the headline
+reduces to "did the model make a positive net ROI". Brier is the model's
+calibration *on the bets it chose to make* (a positively-biased subset — the
+no-edge steps aren't persisted, by design); that limitation is documented at
+the metric.
+
+`src/audit.py` — the proof the verdict is not a lookahead artifact (US-7,
+ADR-0009). It re-derives, from stored candles with its **own** `ts < as_of` SQL
+(deliberately not `store.candles_before` — an auditor that trusted the reader it
+polices would be blind to that reader's bugs), the point-in-time price behind
+every `directional_signal`, and fails any decision whose recorded price came
+from a candle at or after its own `as_of`:
+
+```
+.venv/bin/python src/audit.py my-model-run     # exit 0 clean, 1 on a violation
+```
+
+The non-zero exit makes the audit a CI gate on the backtest's definition of
+done. Both modules self-demo against `$DATABASE_URL`; the acceptance tests
+provision a throwaway database (or `pgserver`) and skip cleanly without one:
+```
+.venv/bin/python tests/test_report_audit.py    # report reconciliation + seeded lookahead
 ```
 
 ## Suggested build order (MVP — see [plan.md](docs/architecture/plan.md))

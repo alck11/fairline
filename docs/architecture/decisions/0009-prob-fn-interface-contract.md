@@ -79,9 +79,12 @@ store/reader object exposing `candles_before(token_id, as_of)`,
   drops into the harness with **no harness change** (US-3 acceptance).
 - `ev_detector.py` is untouched — its `Callable[[str], float]` param is now an
   internal adapter target, bound per-step by the harness. Documented, low blast radius.
-- The PIT guarantee is enforceable and auditable: the US-7 audit re-checks that
-  every `prob_fn` call and every price at `as_of` drew only on `< as_of` data. A
-  model that reaches around the reader to read future rows is a bug the audit catches.
+- The `prob_fn`/forecast PIT guarantee is enforced **by construction**: store.py's
+  PIT readers filter `< as_of` in SQL, one place, for every model. The US-7 audit
+  (`audit_run`) mechanically **re-checks the price surface** — that every recorded
+  signal price reproduces from candlesticks strictly before its `as_of` — catching
+  price lookahead. Re-deriving a model's own `p_model`/forecast PIT-honesty needs
+  the model itself and is deferred to WP-8's model-leakage tests.
 - What becomes harder: a model that legitimately needs *streaming* intra-step data
   must still express it as "timestamped before as_of"; anything without a timestamp
   cannot enter a `ProbFn` and stay auditable. That constraint is deliberate.
