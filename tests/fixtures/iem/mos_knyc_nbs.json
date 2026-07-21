@@ -1,0 +1,64 @@
+{
+  "data": [
+    {
+      "station": "KNYC",
+      "model": "NBS",
+      "runtime": "2026-07-21 00:00",
+      "ftime": "2026-07-21 06:00",
+      "runtime_utc": "2026-07-21T00:00:00.000",
+      "ftime_utc": "2026-07-21T06:00:00.000",
+      "tmp": 72,
+      "n_x": null
+    },
+    {
+      "station": "KNYC",
+      "model": "NBS",
+      "runtime": "2026-07-21 00:00",
+      "ftime": "2026-07-21 09:00",
+      "runtime_utc": "2026-07-21T00:00:00.000",
+      "ftime_utc": "2026-07-21T09:00:00.000",
+      "tmp": 71,
+      "n_x": null
+    },
+    {
+      "station": "KNYC",
+      "model": "NBS",
+      "runtime": "2026-07-21 00:00",
+      "ftime": "2026-07-21 12:00",
+      "runtime_utc": "2026-07-21T00:00:00.000",
+      "ftime_utc": "2026-07-21T12:00:00.000",
+      "tmp": 75,
+      "n_x": null
+    },
+    {
+      "station": "KNYC",
+      "model": "NBS",
+      "runtime": "2026-07-21 00:00",
+      "ftime": "2026-07-21 15:00",
+      "runtime_utc": "2026-07-21T00:00:00.000",
+      "ftime_utc": "2026-07-21T15:00:00.000",
+      "tmp": 78,
+      "n_x": null
+    },
+    {
+      "station": "KNYC",
+      "model": "NBS",
+      "runtime": "2026-07-21 00:00",
+      "ftime": "2026-07-21 18:00",
+      "runtime_utc": "2026-07-21T00:00:00.000",
+      "ftime_utc": "2026-07-21T18:00:00.000",
+      "tmp": 78,
+      "n_x": null
+    },
+    {
+      "station": "KNYC",
+      "model": "NBS",
+      "runtime": "2026-07-21 00:00",
+      "ftime": "2026-07-21 21:00",
+      "runtime_utc": "2026-07-21T00:00:00.000",
+      "ftime_utc": "2026-07-21T21:00:00.000",
+      "tmp": 78,
+      "n_x": null
+    }
+  ]
+}

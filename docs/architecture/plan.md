@@ -215,14 +215,28 @@ repo convention (`python3 tests/<file>.py`, no pytest dependency).
 
 1. **Goal.** Load NOAA/NWS forecast + observation history aligned to Kalshi weather
    markets, so Track B has point-in-time inputs. Serves **US-4 (data)**.
-2. **Scope.** New `src/weather_ingest.py` — download/parse NOAA/NWS bulk forecast +
-   observation data into `weather_forecast` / `weather_observation` (WP-1 upserts).
-   Runs in parallel with A on download waits.
-3. **Inputs.** `store.py` upserts (WP-1, tables from ADR-0010); Kalshi weather
-   markets in the store (WP-3) to know which stations/variables/dates matter.
+2. **Scope.** New `src/weather_ingest.py` — a `WeatherSource` over the **Iowa
+   Environmental Mesonet (IEM)** point API (MOS forecasts + ASOS daily observations)
+   that downloads/parses forecast + observation history into `weather_forecast` /
+   `weather_observation` (WP-1 upserts). Mirrors `KalshiSource`'s shape: HTTP `_get`
+   transport, a typed `WeatherAPIError`, graceful degradation, and fixture-based
+   network-free tests. Source chosen per **ADR-0011** — IEM first (lightweight,
+   stdlib-only, reaches the WP-7 kill gate fastest); the authoritative gridded
+   **NCEI NDFD** archive is deferred to post-GO. `api.weather.gov` is ruled out (it
+   serves no historical forecast archive). Runs in parallel with A on download waits.
+3. **Inputs.** `store.py` upserts + `WeatherForecastRow`/`WeatherObservationRow`
+   (WP-1, tables from ADR-0010); the IEM point API
+   (`mesonet.agron.iastate.edu/api/1`, free, no auth); a curated `STATIONS` registry
+   (`ICAO → IEM network, daily-id, IANA tz`) mapping each Kalshi weather series to
+   the station its markets resolve against (per ADR-0011; not auto-parsed from
+   tickers in the MVP).
 4. **Outputs / signatures.** `weather_ingest.load_forecasts(...)` /
-   `load_observations(...)` populating the tables with correct `issued_at`
-   (forecast) and `observed_at` (observation) PIT keys; idempotent re-run.
+   `load_observations(...)` populating the tables with correct `issued_at` (from MOS
+   `runtime_utc`, the true model-cycle publication time) and `observed_at` (the
+   end-of-local-day instant the daily extreme became knowable, via the station tz)
+   PIT keys; idempotent re-run. Forecasts stored as raw hourly `tmp` under variable
+   `tmpf`; observations as `tmax`/`tmin`. `source` is namespaced (`iem-mos-<model>`,
+   `iem-asos`) so a later NDFD ingest coexists without upsert-key collision.
 5. **Acceptance.** Forecast history for the target stations/variables loads with
    `issued_at < valid_at` on every row; observations cover the resolution dates of
    the loaded Kalshi weather markets; re-running does not duplicate rows.
@@ -288,7 +302,7 @@ repo convention (`python3 tests/<file>.py`, no pytest dependency).
 | WP-3 | A1 | US-2 | 0006, 0008 | WP-1 |
 | WP-4 | A3 | US-5 | 0005, 0009 | WP-1, WP-2, WP-3 |
 | WP-5 | A4 | US-6, US-7 | 0009, 0003(principle) | WP-1, WP-4 |
-| WP-6 | B1 | US-4(data) | 0010 | WP-1, WP-3 |
+| WP-6 | B1 | US-4(data) | 0010, 0011 | WP-1, WP-3 |
 | WP-7 | B2 | US-4(study) | 0009 | WP-3, WP-6 |
 | WP-8 | B3 | US-3(real) | 0009, 0005 | WP-2, WP-6, WP-7=GO |
 

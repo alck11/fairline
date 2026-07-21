@@ -50,6 +50,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow and code style g
 | `src/ingest_polymarket_cli.py` | Ingestion (backend) · PARKED | First `MarketSource` impl: shells out to the official [polymarket-cli](https://github.com/Polymarket/polymarket-cli) (`-o json`, no-auth public data). Install the Rust binary and put `polymarket` on PATH (or set `$POLYMARKET_CLI`). |
 | `src/ingest_kalshi.py` | Ingestion (backend) · MVP data adapter | `KalshiSource`: `MarketDataSource` over Kalshi's **public** trade-api v2 (weather + econ, no auth, free — ADR-0006, WP-3). `wallet_trades`/`leaderboard` raise `NotImplementedError` (Kalshi has no public per-trader feed). Data only — no order placement. |
 | `src/run_kalshi_ingest.py` | Ingestion (entry point) | CLI that pulls Kalshi weather/econ markets + candles + resolutions via `KalshiSource` into the store (`store.py`, WP-1/WP-3). See "Kalshi ingestion" below. |
+| `src/weather_ingest.py` | Ingestion (backend) · Track B data | `WeatherSource`: NOAA/NWS forecast + observation history via the **IEM** point API (MOS forecasts + ASOS daily obs, no auth, free — ADR-0011, WP-6). PIT `issued_at` from MOS `runtime_utc`; NCEI NDFD deferred to post-GO. Data only. |
+| `src/run_weather_ingest.py` | Ingestion (entry point) | CLI that pulls IEM MOS forecasts + ASOS observations for one or more stations into the store (`store.py`, WP-1/WP-6). See "Weather ingestion" below. |
 | `src/prob_fn.py` | Model interface (WP-2) | The `ProbFn` contract (ADR-0009): `prob_fn(MarketRef, as_of) -> p ∈ [0,1]`, point-in-time guaranteed via `store.py`'s PIT readers. Ships `MidpriceProbFn` (placeholder **and** US-6 baseline) and `ClimatologyProbFn`. |
 | `src/backtest.py` | Backtest harness (WP-4) | `run_backtest(conn, prob_fn, ...)`: replays stored Kalshi candles step-by-step, binds `p = prob_fn(ref, as_of)` into `ev_detector.find_signal`, executes through the paper `Engine` under all risk gates, settles hold-to-resolution, and persists signals + results (US-5). See "EV backtest harness" below. |
 | `src/report.py` | Backtest report (WP-5) | `build_report(conn, run_id, baseline_run_id)`: post-fee PnL/ROI, hit rate, Brier, per-trade Sharpe, max drawdown and a per-market breakdown for a model run **and** the baseline run, plus the headline — model net ROI − baseline net ROI as one number (US-6). Reads only stored tables; no re-ingest, no re-run. |
@@ -205,6 +207,57 @@ out-of-range, pagination hangs, and yes_bid/yes_ask fallback correctness —
 no network call happens when running the suite:
 ```
 .venv/bin/python tests/test_ingest_kalshi.py
+```
+
+## Weather ingestion (WP-6)
+
+`src/weather_ingest.py`'s `WeatherSource` loads NOAA/NWS **forecast +
+observation history** — the weather model's only inputs (Track B) — from the
+**Iowa Environmental Mesonet (IEM)** point API (public/free/no-auth). Source
+chosen per **ADR-0011**: `api.weather.gov` serves no historical *forecast*
+archive (current forecast only), so forecasts come from IEM's **MOS** guidance
+and observations from IEM's **ASOS daily** summaries. The authoritative gridded
+**NCEI NDFD** archive is deferred to post-GO (it needs GRIB/eccodes + grid
+point-extraction — overkill before the WP-7 kill gate).
+
+- **Point-in-time by construction:** `weather_forecast.issued_at` is the MOS
+  `runtime_utc` (the model **cycle** = true publication time, never back-filled
+  from `valid_at`); `valid_at` is `ftime_utc`. Every forecast row is checked for
+  `issued_at < valid_at` and fails loud otherwise. `weather_observation.observed_at`
+  is the end-of-local-day instant (via the station's IANA tz), a conservative
+  "knowable by" bound that never leaks a future value into an earlier `as_of`.
+- **Canonical station key:** MOS uses ICAO (`KNYC`), the daily feed uses an IEM
+  network + short id (`NY_ASOS`/`NYC`); both are normalized to the ICAO so the
+  store's PIT readers join forecasts to observations. Registry + Kalshi
+  series→station map live in `weather_ingest.py` (`STATIONS`/`SERIES_STATION`).
+- **Variables/source:** forecasts store raw hourly `tmp` as `tmpf`; observations
+  store `tmax`/`tmin`. `source` is namespaced (`iem-mos-<model>`, `iem-asos`) and
+  is part of the forecast upsert key, so a later NDFD ingest coexists without
+  collision. Idempotent re-run via `store.py`'s `ON CONFLICT` upserts.
+
+Demo (live network, no auth):
+```
+.venv/bin/python src/weather_ingest.py
+```
+Run the real ingest — pulls MOS forecasts + ASOS observations into the store:
+```
+.venv/bin/python src/run_weather_ingest.py --station KNYC --days 30
+.venv/bin/python src/run_weather_ingest.py --station KXHIGHNY --start 2026-06-01 --end 2026-06-30
+```
+`--station` takes a canonical ICAO or a Kalshi series prefix (repeatable);
+point the window at the dates covering your loaded Kalshi weather markets. A
+single run backfills forecast **history** — one MOS model cycle per day across the
+window (`--cycle-hour`, default 12Z, each a real past publication instant) — not
+just the latest cycle, so WP-7 has point-in-time forecast history to study.
+Degrades gracefully (clear stderr, non-zero exit) on API or DB unavailability —
+never a bare traceback.
+
+**Tests are fixture-based, no live network:** `tests/test_weather_ingest.py`
+replays real IEM responses recorded under `tests/fixtures/iem/` (captured live
+2026-07-20), covering PIT-key derivation, DST-correct `observed_at`, window
+filtering, malformed-response handling, and idempotent re-run:
+```
+.venv/bin/python tests/test_weather_ingest.py
 ```
 
 ## EV backtest harness (WP-4)

@@ -1,0 +1,40 @@
+{
+  "data": [
+    {
+      "station": "NYC",
+      "date": "2026-06-01",
+      "max_tmpf": 71.0,
+      "min_tmpf": 53.0
+    },
+    {
+      "station": "NYC",
+      "date": "2026-06-02",
+      "max_tmpf": 76.0,
+      "min_tmpf": 52.0
+    },
+    {
+      "station": "NYC",
+      "date": "2026-06-03",
+      "max_tmpf": 83.0,
+      "min_tmpf": 61.0
+    },
+    {
+      "station": "NYC",
+      "date": "2026-06-04",
+      "max_tmpf": 86.0,
+      "min_tmpf": 64.0
+    },
+    {
+      "station": "NYC",
+      "date": "2026-06-05",
+      "max_tmpf": 88.0,
+      "min_tmpf": 66.0
+    },
+    {
+      "station": "NYC",
+      "date": "2026-06-06",
+      "max_tmpf": 87.0,
+      "min_tmpf": 66.0
+    }
+  ]
+}

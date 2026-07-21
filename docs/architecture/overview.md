@@ -31,7 +31,7 @@ strategy, and emitting a GO/KILL report against an always-market-price baseline.
 flowchart TD
     subgraph Sources["Data sources (free, no trading auth)"]
         KAPI[Kalshi public REST/WS/FIX\nmarkets, candles, trades, resolutions]
-        NOAA[NOAA/NWS bulk\nforecast + observation history]
+        NOAA[NOAA/NWS forecast + observation history\nvia IEM point API; NCEI NDFD deferred, ADR-0011]
     end
 
     subgraph Ingest["Ingestion (ADR-0006)"]
@@ -97,7 +97,7 @@ flowchart TD
 | Python 3.10+, pandas/numpy/scipy | Point-in-time replay, calibration stats, and report metrics; matches the existing repo. |
 | `fees.py` Kalshi coefficient (built) | Kalshi fee is the same `coef·contracts·p·(1−p)` shape already modelled; single source of truth. |
 | `ev_detector.py` + `risk_execution.py` (built) | EV/Kelly math and the paper Engine with risk gates already exist and are Kalshi-ready. |
-| NOAA/NWS bulk data | Free, authoritative forecast+observation history — the weather model's only inputs (Track B). |
+| NOAA/NWS forecast+observation history (via IEM) | Free forecast+observation history — the weather model's only inputs (Track B). Sourced from the Iowa Environmental Mesonet point API (MOS forecasts + ASOS observations); the authoritative gridded NCEI NDFD archive is deferred until post-GO (ADR-0011) — `api.weather.gov` serves no forecast history. |
 | IBKR (post-MVP execution) | User's choice; one account routes Kalshi+ForecastEx+CME. Data stays free/direct from Kalshi (ADR-0008). |
 | XGBoost, Ollama, polymarket-cli | **Parked** — used only by the copy-trade/matcher subsystems; not on the MVP path. |
 
