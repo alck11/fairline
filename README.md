@@ -262,6 +262,46 @@ filtering, malformed-response handling, and idempotent re-run:
 .venv/bin/python tests/test_weather_ingest.py
 ```
 
+## Full pipeline: ingest → calibration gate (WP-6 + WP-7)
+
+To run the complete de-risking gate on real data, **after you have provisioned
+Postgres + TimescaleDB and loaded Kalshi markets (WP-3)**:
+
+```bash
+# 1. Ingest weather history (forecasts + observations) for your target dates
+.venv/bin/python src/run_weather_ingest.py \
+  --station KXHIGHNY \
+  --start 2026-06-01 --end 2026-06-30
+
+# 2. Run the calibration study: scores the naive forecast benchmark vs
+#    Kalshi's price by Brier skill, produces a GO/NO-GO verdict
+.venv/bin/python src/run_calibration.py \
+  --start 2026-06-01 --end 2026-06-30 --step-hours 12
+
+# Exit code: 0=GO (model edge exists), 2=NO-GO (price tracks forecast),
+#            1=error
+```
+
+**What happens:**
+- `run_weather_ingest` pulls 30 days of MOS forecast cycles and ASOS daily
+  observations for the target station from IEM, idempotently upserts into the
+  store (point-in-time guaranteed via `weather_forecast.issued_at` and
+  `weather_observation.observed_at`).
+- `run_calibration` iterates each stored weather market's type (`greater`,
+  `less`, `between`), samples its price every 12 hours before resolution,
+  computes the naive forecast probability from the station's historical
+  forecast error distribution (min 10 pairs), and aggregates Brier scores
+  across samples. Skips markets with unparseable strikes or insufficient
+  history (fail-safe, not corrupt). Overall verdict: GO if any type clears the
+  5% skill margin (default, configurable).
+
+**Failure modes:**
+- No markets ingested / no forecasts for the target dates → 0 samples → NO-GO
+  (no edge room can be shown, defensible stop).
+- Postgres unavailable → non-zero exit, clear stderr message.
+- Kalshi/IEM API down during ingest → clear stderr, non-zero exit, idempotent
+  retry on next run (partial ingests are safe).
+
 ## Calibration study — edge-room GO/NO-GO gate (WP-7)
 
 `src/calibration.py` answers the one question that gates the expensive weather

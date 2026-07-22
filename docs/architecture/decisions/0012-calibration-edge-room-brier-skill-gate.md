@@ -78,3 +78,11 @@ no scipy dependency). The realized label is the market's settled `resolved_value
   (start-of-next-local-day): the study recovers the observed calendar date as one
   local day before `observed_at`. If WP-6 ever changes that convention, this
   derivation must change with it — called out here as the one cross-WP coupling.
+
+- **No memoization of `_error_stats` (station-history sigma/bias) in MVP.** The study
+  rescans the entire observation/forecast history on each `(market, as_of)` pair, which
+  is O(n²) in principle; however, a 180-day history takes ~0.45ms per call. Even for
+  1000 markets × 30 `as_of` samples each, this is acceptable (~13 seconds total). A
+  future optimization (memoizing per-station σ/bias at each `as_of`) could amortize
+  this, but it is not required to reach the gate. Trade-off: complexity vs performance
+  is reasonable today; revisit if backfills span years.
