@@ -110,15 +110,38 @@ def _parse_target_date(external_id: str) -> date | None:
 def _parse_strike(rules: str) -> tuple[str, float | None, float | None] | None:
     """(strike_type, lo, hi) from the Kalshi `rules_primary` text — the resolution
     ground truth. Returns None if no recognized strike phrasing is found (skip the
-    market rather than guess)."""
+    market rather than guess). Covers:
+    - "between X and Y" / "between X-Y" / "between X to Y" -> ("between", X, Y)
+    - "less than X" / "X or fewer" -> ("less", None, X)
+    - "greater than X" / "above X" / "at least X" -> ("greater", X, None)
+    - any other phrasing (binaries, time-based yes/no, unstructured) -> None (skip)
+    Non-weather markets that resolve yes/no with no numeric strike (strike_type=None,
+    or structured climate/geopolitical binaries) are **not** weather market specs and
+    return None — they lack the daily-high forecast anchor the study needs."""
     r = rules.lower()
-    m = re.search(r"between\s+(\d+(?:\.\d+)?)\s*(?:-|–|to)\s*(\d+(?:\.\d+)?)", r)
+    # between X and/to/- Y
+    m = re.search(r"between\s+(\d+(?:\.\d+)?)\s*(?:-|–|to|and)\s*(\d+(?:\.\d+)?)", r)
     if m:
         return "between", float(m.group(1)), float(m.group(2))
-    m = re.search(r"less than\s+(\d+(?:\.\d+)?)", r)
+    # less than / fewer than X
+    m = re.search(r"(?:less than|fewer than)\s+(\d+(?:\.\d+)?)", r)
     if m:
         return "less", None, float(m.group(1))
+    # X or fewer / X or less (e.g. "4909.9 million metric tonnes ... or fewer")
+    m = re.search(r"(\d+(?:\.\d+)?)[^0-9]*(?:or fewer|or less)\b", r)
+    if m:
+        return "less", None, float(m.group(1))
+    # greater than / above X (immediate)
     m = re.search(r"(?:greater than|above)\s+(\d+(?:\.\d+)?)", r)
+    if m:
+        return "greater", float(m.group(1)), None
+    # at least [intervening text] X (e.g., "at least an earthquake of 8.0")
+    m = re.search(r"at least[^0-9]*(\d+(?:\.\d+)?)", r)
+    if m:
+        return "greater", float(m.group(1)), None
+    # X or more / X% or higher (e.g., "share ... is above 10%", "12.5 ... or more")
+    # Allow intervening words (e.g., "million tonnes or more")
+    m = re.search(r"(\d+(?:\.\d+)?).{0,30}(?:or more|or higher)\b", r)
     if m:
         return "greater", float(m.group(1)), None
     return None

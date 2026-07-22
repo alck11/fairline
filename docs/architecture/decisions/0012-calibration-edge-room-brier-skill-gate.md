@@ -50,9 +50,14 @@ no scipy dependency). The realized label is the market's settled `resolved_value
   ("... is less than 80°" / "... between 80-81°"); the ticker carries the date;
   `weather_ingest.SERIES_STATION` maps the series to a station. An unparseable
   market is **skipped, never guessed** (a mis-parsed threshold would silently
-  corrupt the study). Promoting this to ingest-time structured storage (a
-  `market.params` JSONB, foreseen in ADR-0010) is a later option, not required to
-  reach the gate. This keeps WP-7 inside its "do not touch Track A" boundary.
+  corrupt the study). The parser handles standard Kalshi phrasings: "less than X",
+  "X or fewer", "greater than X", "above X", "at least X", "X or more", and
+  "between X and/to/-/and Y" — tested against real Kalshi rules strings. Non-weather
+  yes/no binaries (Kalshi's dominant market pattern: earthquake/climate events with
+  `strike_type=None`, no numeric bounds) have no daily-high forecast anchor and are
+  skipped. Promoting this to ingest-time structured storage (a `market.params` JSONB,
+  foreseen in ADR-0010) is a later option, not required to reach the gate. This keeps
+  WP-7 inside its "do not touch Track A" boundary.
 - **The Gaussian error transform is a benchmark, not a model.** It is intentionally
   simple (a single station-level bias + σ, leads mixed) so it cannot be mistaken
   for WP-8. WP-8 is free to build a richer, per-lead, feature-based model; WP-7

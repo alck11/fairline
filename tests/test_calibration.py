@@ -147,6 +147,46 @@ def test_parse_target_date_variants():
 # ---------------------------------------------------------------------------
 # forecast -> probability math
 # ---------------------------------------------------------------------------
+def test_parse_strike_expands_real_phrasings():
+    """Verify the expanded parser handles more real Kalshi strike phrasings beyond
+    the fixture's "less" and "between" (deferred review flag: extended phrasings
+    like "above X", "X or more", "X or fewer" were not tested against real rules)."""
+    # Add a temporary test series to avoid needing a full Kalshi data load
+    orig = weather_ingest.SERIES_STATION.get("KXTEST")
+    weather_ingest.SERIES_STATION["KXTEST"] = "KNYC"
+    try:
+        cases = [
+            # "greater than X"
+            ("KXTEST-01JAN25", "greater than 80.5°F", "greater", 80.5, None),
+            # "above X"
+            ("KXTEST-01JAN25", "is above 15%", "greater", 15.0, None),
+            # "at least X"
+            ("KXTEST-01JAN25", "at least an earthquake of 8.0", "greater", 8.0, None),
+            # "X or more"
+            ("KXTEST-01JAN25", "12.5 million tonnes or more", "greater", 12.5, None),
+            # "X or fewer" (less)
+            ("KXTEST-01JAN25", "4909.9 million metric tonnes or fewer", "less", None, 4909.9),
+            # "fewer than X"
+            ("KXTEST-01JAN25", "fewer than 50 earthquakes", "less", None, 50.0),
+            # "between X and Y"
+            ("KXTEST-01JAN25", "between 75.0 and 85.0°F", "between", 75.0, 85.0),
+            # "between X - Y" (dash)
+            ("KXTEST-01JAN25", "between 10-20%", "between", 10.0, 20.0),
+        ]
+        for ticker, rules, exp_type, exp_lo, exp_hi in cases:
+            spec = parse_weather_market_spec(ticker, rules)
+            check(spec is not None, f"'{rules}' should parse, got None")
+            check(spec.strike_type == exp_type,
+                  f"'{rules}' strike should be {exp_type}, got {spec.strike_type}")
+            check(spec.lo == exp_lo and spec.hi == exp_hi,
+                  f"'{rules}' bounds should be ({exp_lo},{exp_hi}), got ({spec.lo},{spec.hi})")
+    finally:
+        if orig is None:
+            del weather_ingest.SERIES_STATION["KXTEST"]
+        else:
+            weather_ingest.SERIES_STATION["KXTEST"] = orig
+
+
 def test_forecast_prob_less_greater_between():
     # mu=80, sigma=5
     less = WeatherMarketSpec("x", "KNYC", "tmax", date(2026, 6, 1), "less", None, 80.0)
@@ -508,6 +548,7 @@ def main() -> int:
         test_parse_spec_greater_phrasing,
         test_parse_spec_none_cases,
         test_parse_target_date_variants,
+        test_parse_strike_expands_real_phrasings,
         test_forecast_prob_less_greater_between,
         test_forecast_high_latest_cycle_and_daily_max,
         test_error_stats_pit_and_gates,
