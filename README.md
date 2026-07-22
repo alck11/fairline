@@ -99,6 +99,11 @@ See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for full development guide.
 Everything else in the repo (the detectors, scoring, risk engine) runs with no
 database at all — only `store.py` and anything built on it need this.
 
+Using **Neon** (serverless Postgres) instead of local/Docker? See
+[docs/ops/neon-setup.md](docs/ops/neon-setup.md) — verified TimescaleDB
+support, storage limits, and the exact commands for the WP-6/WP-7 real-data
+gate run.
+
 1. Install Postgres + TimescaleDB. Options:
    - Docker (fastest for local dev): `docker run -d --name fairline-pg -p 5432:5432 \
      -e POSTGRES_PASSWORD=postgres timescale/timescaledb:latest-pg16`
