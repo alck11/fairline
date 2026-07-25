@@ -89,12 +89,88 @@ State plainly, because a NO-GO invites over-reading:
 - **Fee-free by construction.** Edge *room*, not net profitability. A GO here
   would still have had to survive fees and slippage in WP-4/WP-5.
 
+## Follow-up test (2026-07-25): lead-stratified benchmark — tested, NO-GO holds
+
+The revisit condition below listed "a lead-stratified error model" as the
+cheapest way to reopen this. It was tested the same day
+(`scripts/lead_stratified_study.py`) and **does not reopen it.** The result is
+worth recording in full, because *why* it fails is more informative than the
+verdict.
+
+**The motivating defect is real.** ADR-0012's `_error_stats` estimates σ from
+past dates, where "the latest cycle before `as_of`" is always a final ~16h-lead
+nowcast — then applies that σ to price a market whose forecast may be days out.
+On this station's data the spread more than doubles across that range:
+
+| lead | n | bias | σ |
+|---|---|---|---|
+| 12–24h | 83 | -0.45 | 2.45 |
+| 36–48h | 82 | -0.67 | 2.84 |
+| 48–72h | 81 | -0.80 | 3.25 |
+| 72–120h | 80 | +9.25 | 5.76 |
+
+**But it never binds, because of market structure.** Every KXHIGHNY market's
+price history begins **exactly ~37–38h before end-of-target-day** — verified as
+a real listing fact, not the truncation the candlestick cap could have caused:
+requesting daily bars over a 30-day window returns only **2** bars, hourly
+returns 39, minute returns 1383, and all three agree on the same ~38h span.
+Three granularities cannot be truncated to an identical window.
+
+So every sample sits at 0–48h lead, where the pooled σ is nearly correct.
+Stratifying changed skill by -1.6% / -17.6% / +0.1% — slightly *worse*, and
+nowhere near the +5% margin.
+
+**The structural finding.** Breaking the pooled study down by lead:
+
+| lead | n | Brier(px) | Brier(fc) | skill |
+|---|---|---|---|---|
+| 0–6h | 408 | 0.0110 | 0.1173 | -967.6% |
+| 6–12h | 408 | 0.0709 | 0.1173 | -65.3% |
+| 12–18h | 408 | 0.0935 | 0.1238 | -32.5% |
+| 18–24h | 408 | 0.0948 | 0.1238 | -30.6% |
+| 24–30h | 408 | 0.1072 | 0.1241 | -15.8% |
+| 30–36h | 402 | 0.1082 | 0.1245 | -15.0% |
+
+`Brier(fc)` is essentially **flat** (0.117→0.125): between 12h and 38h out, the
+MOS forecast barely changes, so the benchmark carries the same information
+throughout. `Brier(px)` rises steeply with lead (0.011→0.108) as the market
+loses its late information. The two converge — but the market is still ~15%
+ahead at the oldest lead that exists, and the trend is **flattening**
+(-15.8% → -15.0%), not closing.
+
+**This is why Track B fails, and it is not a modelling failure.** The window
+where a forecast edge could exist (3+ days out, where σ balloons and the market
+would be uninformed) is a window in which **the market does not exist to trade**.
+By the time Kalshi lists these contracts, the forecast is a short-lead nowcast
+that the price has already absorbed. No improvement to the model reaches the
+missing 20 points of skill, because the constraint is the listing schedule, not
+the benchmark.
+
+That makes the NO-GO stronger than ADR-0012's gate alone implies: it is not
+"this crude benchmark found no room" here, it is "there is no tradeable window
+in which room could exist for this series."
+
 ## What would justify revisiting
 
-Any one of: a second station/series with materially worse public forecasts; a
-cold-season sample; or evidence that a lead-stratified error model beats the
-pooled-σ benchmark on the same data (cheap to test — the data is already
-ingested and backed up).
+Narrowed by the finding above. A better *model* is no longer a plausible route
+for KXHIGHNY — the tradeable window forecloses it. What remains:
+
+- **A series listed further ahead of resolution.** The binding constraint is the
+  ~38h listing window. A weather market listed a week out would put samples in
+  the 72h+ band where σ is 5.76 and the market is uninformed. This is the only
+  high-value check left, and it is a *venue/series* question, not a modelling one.
+- **A station with materially worse public forecasts** (`SERIES_STATION` maps
+  only KXHIGHNY→KNYC today).
+- **A cold-season sample** — this is one summer.
+
+## Operational note (follow-up)
+
+The lead-stratified study runs the full 408-market comparison in **12 seconds**
+using an in-memory preloading reader, against **3,251s** for the same pooled
+model over the network — a ~270x speedup on identical output. It reproduces
+this ADR's headline numbers exactly, which is what validates the reader. Strong
+confirmation that research belongs on local data
+([docs/ops/local-postgres.md](../../ops/local-postgres.md)).
 
 ## Operational note
 
