@@ -104,6 +104,14 @@ Using **Neon** (serverless Postgres) instead of local/Docker? See
 support, storage limits, and the exact commands for the WP-6/WP-7 real-data
 gate run.
 
+Doing **backtesting or calibration research**? Run it against a local Postgres
+instead — those loops are latency-bound (tens of thousands of small queries per
+pass), so a hosted database turns seconds of work into half an hour. See
+[docs/ops/local-postgres.md](docs/ops/local-postgres.md) for the PG18 setup,
+and `scripts/dump_db.py` / `scripts/restore_local.py` to move the data across.
+TimescaleDB is *not* required for a research replica — hypertables are a
+storage layout and do not change query results.
+
 1. Install Postgres + TimescaleDB. Options:
    - Docker (fastest for local dev): `docker run -d --name fairline-pg -p 5432:5432 \
      -e POSTGRES_PASSWORD=postgres timescale/timescaledb:latest-pg16`
