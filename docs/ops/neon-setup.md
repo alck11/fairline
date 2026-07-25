@@ -33,6 +33,26 @@ against Neon's docs and the schema before recommending this:
   all small numeric rows) but unverified until you actually load data.
   Upgrading to the Launch tier (pay-as-you-go, $0.35/GB-month, no hard cap) is
   a non-destructive change if you outgrow it.
+- **Data transfer (egress) is metered too, and it is the limit that actually
+  bit us** — not storage. Storage stayed trivial; egress did not. On
+  2026-07-24 a full-window calibration run exhausted the free tier's monthly
+  transfer quota in ~95 minutes and the project stopped accepting connections
+  outright:
+
+  ```
+  ERROR:  Your project has exceeded the data transfer quota.
+          Upgrade your plan to increase limits.
+  ```
+
+  This is a **hard lockout, not a slowdown** — every query fails, including
+  the ones you would use to inspect or dump the data, so plan around it rather
+  than expecting to recover mid-run. The cause was `calibration._error_stats`
+  re-reading the station's entire forecast history once per (market × as_of)
+  pair, ~10⁵ whole-history reads. That is fixed (see ADR-0012 — the study now
+  memoizes those reads), so a repeat run costs a few hundred queries rather
+  than a hundred thousand. The general point stands for anything new you point
+  at this database: **on a metered backend, a query issued in a loop is a
+  billing decision, not just a latency one.**
 
 ## Phase 1 — create the Neon project (you; needs your account)
 

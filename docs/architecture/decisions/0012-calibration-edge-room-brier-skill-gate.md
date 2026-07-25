@@ -79,10 +79,41 @@ no scipy dependency). The realized label is the market's settled `resolved_value
   local day before `observed_at`. If WP-6 ever changes that convention, this
   derivation must change with it — called out here as the one cross-WP coupling.
 
-- **No memoization of `_error_stats` (station-history sigma/bias) in MVP.** The study
-  rescans the entire observation/forecast history on each `(market, as_of)` pair, which
-  is O(n²) in principle; however, a 180-day history takes ~0.45ms per call. Even for
-  1000 markets × 30 `as_of` samples each, this is acceptable (~13 seconds total). A
-  future optimization (memoizing per-station σ/bias at each `as_of`) could amortize
-  this, but it is not required to reach the gate. Trade-off: complexity vs performance
-  is reasonable today; revisit if backfills span years.
+- **`_error_stats` IS memoized (reversed 2026-07-24 — the original call was wrong).**
+  The study rescans the entire observation/forecast history on each `(market, as_of)`
+  pair, which is O(n²). This ADR originally declined to memoize, on a measured
+  ~0.45ms per call and an estimated ~13s for 1000 markets × 30 `as_of` samples.
+
+  **That estimate was invalid.** It was measured against an in-memory `FakeReader` in
+  the test suite, so it priced only Python's rescan and silently assumed data access
+  was free. In production the reader is `StoreReader` over Postgres, and each rescan
+  is a *network round trip returning the station's whole forecast history*. The real
+  first full-scale run — 420 markets × 272 `as_of` steps over a 68-day window against
+  a Neon-hosted database — issued on the order of 10⁵ whole-history reads. It ran
+  **5,737 seconds without finishing**, and terminated by exhausting the Neon project's
+  monthly data-transfer quota, which locked every subsequent query out of the database
+  entirely. The cost was never 13 seconds; it was the study plus the database.
+
+  The general lesson, which outlives this ADR: **a benchmark taken against a test
+  double does not price the dependency the double replaces.** An O(n²) scan whose
+  inner term is a remote query is a different decision from one whose inner term is a
+  list comprehension, and only the latter was measured.
+
+  Now implemented in `calibration.py` as two per-run caches, created inside
+  `evaluate()` and dropped on return (never module state):
+  - `_MemoReader` — deduplicates `forecasts_before`/`observations_before` on their
+    exact arguments, `as_of` included. This is replay of identical calls, not
+    re-filtering: the `< as_of` boundary still comes from SQL in `store.py`, and no
+    row the reader excluded is ever held. `candles_before` is left alone — it has no
+    repeated arguments to collapse and returns few rows.
+  - `_StudyMemo` — memoizes `_forecast_high` on `(station, target_date, as_of)` and
+    `_error_stats` on `(station, as_of, exclude_date, min_pairs)`: in each case the
+    complete input set, so a hit returns what recomputation would have.
+
+  Point-in-time integrity is unchanged by construction, and
+  `test_memoization_matches_uncached_results` pins it — it compares a memoized study
+  against one with the memo tables neutered, on raw floats rather than the 4-decimal
+  report (a memo key missing `exclude_date` passes a `format()` comparison and fails
+  this one). `test_memoization_actually_collapses_reads` guards the performance
+  property itself, so a refactor that quietly drops the memo fails a test instead of
+  costing another database.

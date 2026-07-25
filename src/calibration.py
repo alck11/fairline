@@ -173,6 +173,63 @@ def parse_weather_market_spec(external_id: str, resolution_text: str | None
 # ---------------------------------------------------------------------------
 # the naive forecast -> probability benchmark (non-trained; not WP-8's model)
 # ---------------------------------------------------------------------------
+class _StudyMemo:
+    """Per-run memo tables for one evaluate() call (never module-level state, so
+    two studies can never see each other's cache).
+
+    Both tables are keyed on the *complete* input set of the function they
+    memoize, so a hit returns what a recomputation would have returned — this
+    changes how often work is done, never its result. See _memoized_reader for
+    the I/O half and ADR-0012 for why this stopped being optional."""
+    __slots__ = ("highs", "stats")
+
+    def __init__(self) -> None:
+        self.highs: dict[tuple, float | None] = {}
+        self.stats: dict[tuple, tuple[float, float] | None] = {}
+
+
+class _MemoReader:
+    """Reader wrapper that memoizes the two *whole-history* PIT reads on their
+    exact arguments, `as_of` included.
+
+    This is deduplication of identical calls, NOT a change of filtering: a hit
+    replays the very rows `reader.forecasts_before(station, variable, as_of)`
+    returned, so the `< as_of` boundary still comes from the underlying reader
+    (in production, from SQL in store.py). No row the reader excluded is ever
+    held, and nothing is re-filtered in process.
+
+    Why it exists: _error_stats rescans the station's full forecast/observation
+    history for every (market x as_of) pair, which over a 420-market, 68-day
+    window is ~10^5 identical whole-table reads. Against a local Postgres that
+    was merely slow; against a metered serverless database it exhausted the
+    project's monthly data-transfer quota in 95 minutes without finishing the
+    study (ADR-0012). `candles_before` is deliberately NOT memoized: it is
+    called once per (market, as_of) with no repeated arguments to collapse, and
+    returns a handful of rows rather than the whole history."""
+
+    def __init__(self, reader: Reader):
+        self._reader = reader
+        self._forecasts: dict[tuple, list] = {}
+        self._observations: dict[tuple, list] = {}
+
+    def candles_before(self, token_id: str, as_of: datetime) -> list:
+        return self._reader.candles_before(token_id, as_of)
+
+    def forecasts_before(self, station: str, variable: str, as_of: datetime) -> list:
+        key = (station, variable, as_of)
+        if key not in self._forecasts:
+            self._forecasts[key] = self._reader.forecasts_before(
+                station, variable, as_of)
+        return self._forecasts[key]
+
+    def observations_before(self, station: str, variable: str, as_of: datetime) -> list:
+        key = (station, variable, as_of)
+        if key not in self._observations:
+            self._observations[key] = self._reader.observations_before(
+                station, variable, as_of)
+        return self._observations[key]
+
+
 def _norm_cdf(z: float) -> float:
     """Standard normal CDF Φ via stdlib math.erf (no scipy dependency)."""
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
@@ -183,20 +240,34 @@ def _local_date(dt: datetime, tz: ZoneInfo) -> date:
 
 
 def _forecast_high(reader: Reader, station: str, target_date: date,
-                   as_of: datetime, tz: ZoneInfo) -> float | None:
+                   as_of: datetime, tz: ZoneInfo,
+                   memo: _StudyMemo | None = None) -> float | None:
     """The forecast daily high for `target_date` knowable at `as_of`: from the
     LATEST MOS cycle issued strictly before `as_of`, the max of its hourly `tmpf`
-    rows valid on the target date. None if no such forecast exists."""
+    rows valid on the target date. None if no such forecast exists.
+
+    `memo` (supplied by evaluate(); None in direct/test calls) caches the result
+    per (station, target_date, as_of). The value is a pure function of exactly
+    those three plus `tz`, which is fixed per station — so this is reuse of an
+    identical computation, never a different one."""
+    key = (station, target_date, as_of)
+    if memo is not None and key in memo.highs:
+        return memo.highs[key]
     rows = [r for r in reader.forecasts_before(station, FORECAST_VARIABLE, as_of)
             if _local_date(r.valid_at, tz) == target_date]
     if not rows:
-        return None
-    latest_cycle = max(r.issued_at for r in rows)
-    return max(r.value for r in rows if r.issued_at == latest_cycle)
+        out = None
+    else:
+        latest_cycle = max(r.issued_at for r in rows)
+        out = max(r.value for r in rows if r.issued_at == latest_cycle)
+    if memo is not None:
+        memo.highs[key] = out
+    return out
 
 
 def _error_stats(reader: Reader, station: str, as_of: datetime, tz: ZoneInfo,
-                 min_pairs: int, exclude_date: date | None = None
+                 min_pairs: int, exclude_date: date | None = None,
+                 memo: _StudyMemo | None = None
                  ) -> tuple[float, float] | None:
     """(bias, σ) of the forecast daily-high error (observed − forecast) from the
     station's history knowable strictly before `as_of` — the spread the naive
@@ -214,7 +285,30 @@ def _error_stats(reader: Reader, station: str, as_of: datetime, tz: ZoneInfo,
     always passes the market's `target_date` here.
 
     None if fewer than `max(2, min_pairs)` usable pairs (need ≥2 for a sample
-    variance) or zero variance."""
+    variance) or zero variance.
+
+    `memo` (supplied by evaluate(); None in direct/test calls) caches the result
+    per (station, as_of, exclude_date, min_pairs) — the full set of inputs the
+    return value depends on, `tz` again being fixed per station. Every market
+    sharing a target_date shares this computation, so the memo collapses the
+    per-(market x as_of) rescan this function is otherwise structurally forced
+    into (ADR-0012)."""
+    key = (station, as_of, exclude_date, min_pairs)
+    if memo is not None and key in memo.stats:
+        return memo.stats[key]
+    out = _error_stats_uncached(reader, station, as_of, tz, min_pairs,
+                                exclude_date, memo)
+    if memo is not None:
+        memo.stats[key] = out
+    return out
+
+
+def _error_stats_uncached(reader: Reader, station: str, as_of: datetime,
+                          tz: ZoneInfo, min_pairs: int,
+                          exclude_date: date | None,
+                          memo: _StudyMemo | None) -> tuple[float, float] | None:
+    """The body of _error_stats — split out only so the memo lookup above stays
+    a single obvious wrapper around unchanged logic."""
     residuals: list[float] = []
     for obs in reader.observations_before(station, OBS_VARIABLE, as_of):
         # WP-6 stores observed_at as the start of the NEXT local day, so the
@@ -222,7 +316,7 @@ def _error_stats(reader: Reader, station: str, as_of: datetime, tz: ZoneInfo,
         obs_date = (obs.observed_at.astimezone(tz) - timedelta(days=1)).date()
         if obs_date == exclude_date:
             continue
-        f = _forecast_high(reader, station, obs_date, as_of, tz)
+        f = _forecast_high(reader, station, obs_date, as_of, tz, memo)
         if f is not None:
             residuals.append(obs.value - f)
     n = len(residuals)
@@ -347,6 +441,10 @@ def evaluate(reader: Reader, markets: list[WeatherMarket], *,
     """The pure study core: score price vs the naive forecast benchmark over a
     fake or real `reader`. Kept reader-based (not conn-based) so it is testable
     with a synthetic in-memory Reader, exactly like prob_fn."""
+    # Memoization is scoped to this call: both objects are created here and
+    # dropped on return, so no state survives between studies.
+    reader = _MemoReader(reader)
+    memo = _StudyMemo()
     samples: list[Sample] = []
     studied = 0
     for mkt in markets:
@@ -359,11 +457,12 @@ def evaluate(reader: Reader, markets: list[WeatherMarket], *,
             if not candles:
                 continue
             price = max(candles, key=lambda c: c.ts).close
-            f_hat = _forecast_high(reader, spec.station, spec.target_date, as_of, tz)
+            f_hat = _forecast_high(reader, spec.station, spec.target_date, as_of,
+                                   tz, memo)
             if f_hat is None:
                 continue
             stats = _error_stats(reader, spec.station, as_of, tz, min_error_pairs,
-                                 exclude_date=spec.target_date)
+                                 exclude_date=spec.target_date, memo=memo)
             if stats is None:
                 continue
             bias, sigma = stats

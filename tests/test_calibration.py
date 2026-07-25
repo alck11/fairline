@@ -541,6 +541,183 @@ def test_yes_outcome_helper():
 
 
 # ---------------------------------------------------------------------------
+# memoization equivalence (ADR-0012): caching must change cost, never results
+# ---------------------------------------------------------------------------
+class CountingReader(FakeReader):
+    """FakeReader that counts the whole-history reads _error_stats forces."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.forecast_reads = 0
+        self.observation_reads = 0
+
+    def forecasts_before(self, station, variable, as_of):
+        self.forecast_reads += 1
+        return super().forecasts_before(station, variable, as_of)
+
+    def observations_before(self, station, variable, as_of):
+        self.observation_reads += 1
+        return super().observations_before(station, variable, as_of)
+
+
+def _multi_market_fixture():
+    """Several markets on DIFFERENT target dates and strike types sharing one
+    as_of grid — the shape that would expose a memo key collision. A memo keyed
+    too loosely (dropping exclude_date, say) would hand one market another's
+    error stats, which the single-market fixtures elsewhere cannot detect."""
+    fc, obs = _history(30, base=date(2026, 6, 1))
+    candles, markets = [], []
+    for i, (tgt_day, stype, lo, hi, y) in enumerate([
+            (22, "greater", 80.0, None, 1.0),
+            (23, "less", None, 78.0, 0.0),
+            (24, "between", 79.0, 81.0, 1.0),
+            (25, "greater", 75.0, None, 0.0),
+    ]):
+        tgt = date(2026, 6, tgt_day)
+        token = f"KX-{tgt_day}-YES"
+        valid = datetime(2026, 6, tgt_day, 18, tzinfo=UTC)
+        fc += [WeatherForecastRow(datetime(2026, 6, tgt_day - 1, h, tzinfo=UTC),
+                                  valid, "KNYC", "tmpf", 79.0 + i, "iem-mos-nbs", 24.0)
+               for h in (6, 12)]
+        candles.append(Candle(datetime(2026, 6, tgt_day, 0, tzinfo=UTC), token,
+                              0.4 + 0.1 * i, 0.4 + 0.1 * i, 0.4 + 0.1 * i,
+                              0.4 + 0.1 * i, 100.0))
+        spec = WeatherMarketSpec(f"KXHIGHNY-26JUN{tgt_day}-T80", "KNYC", "tmax",
+                                 tgt, stype, lo, hi)
+        # resolves_at deliberately sits ~2 days past the target date, so each
+        # market's as_of grid extends BEYOND the instant its own observation
+        # becomes readable (end-of-local-day, i.e. tgt+1 04:00 UTC). That
+        # window is exactly where _error_stats' exclude_date does its work; a
+        # grid ending at resolution-day midnight never triggers the exclusion
+        # at all, and a memo keyed without exclude_date would then look correct.
+        markets.append(WeatherMarket(spec, token,
+                                     datetime(2026, 6, tgt_day + 3, 4, tzinfo=UTC),
+                                     resolved_y=y))
+    return candles, fc, obs, markets
+
+
+def test_memoization_matches_uncached_results():
+    """The memo added for ADR-0012 must be invisible in the output. Compares a
+    normal evaluate() against one whose memo tables are neutered, over markets
+    with distinct target dates — same samples, same Briers, same verdict."""
+    candles, fc, obs, markets = _multi_market_fixture()
+    kwargs = dict(start=datetime(2026, 6, 22, tzinfo=UTC),
+                  end=datetime(2026, 6, 29, 4, tzinfo=UTC),
+                  step=timedelta(hours=6), min_error_pairs=5)
+
+    cached = evaluate(CountingReader(candles, fc, obs), markets, **kwargs)
+
+    # Defeat both memos: a table that never retains anything forces every call
+    # down the original recompute path, so this run is the pre-memo behaviour.
+    class NullDict(dict):
+        def __setitem__(self, k, v):
+            pass
+
+    orig = calibration._StudyMemo.__init__
+    def _null_init(self):
+        self.highs, self.stats = NullDict(), NullDict()
+    calibration._StudyMemo.__init__ = _null_init
+    orig_reader = calibration._MemoReader
+    calibration._MemoReader = lambda r: r        # bypass the I/O memo too
+    try:
+        uncached = evaluate(CountingReader(candles, fc, obs), markets, **kwargs)
+    finally:
+        calibration._StudyMemo.__init__ = orig
+        calibration._MemoReader = orig_reader
+
+    check(cached.n_samples == uncached.n_samples and cached.n_samples > 0,
+          f"sample count differs: {cached.n_samples} vs {uncached.n_samples}")
+    check(cached.n_markets == uncached.n_markets, "market count differs")
+    check(cached.overall_verdict == uncached.overall_verdict, "verdict differs")
+    # Compare the raw floats, NOT format() — the report rounds to 4 decimals,
+    # which is coarse enough to hide a genuinely wrong memo. (Verified: a memo
+    # key missing `exclude_date` — which serves one market another market's
+    # error stats — passes a format()-based comparison and fails this one.)
+    check(len(cached.results) == len(uncached.results), "result-row count differs")
+    for c, u in zip(cached.results, uncached.results):
+        check(c.market_type == u.market_type and c.n == u.n,
+              f"row mismatch: {c.market_type} n={c.n} vs {u.market_type} n={u.n}")
+        for field in ("brier_price", "brier_forecast", "skill", "mean_gap"):
+            cv, uv = getattr(c, field), getattr(u, field)
+            check(cv == uv,
+                  f"{c.market_type}.{field} differs: {cv!r} vs {uv!r}")
+        check(c.verdict == u.verdict, f"{c.market_type} verdict differs")
+
+
+def test_memoization_actually_collapses_reads():
+    """Guards the point of the change: if a refactor silently drops the memo,
+    the equivalence test above still passes and only this one fails."""
+    candles, fc, obs, markets = _multi_market_fixture()
+    kwargs = dict(start=datetime(2026, 6, 22, tzinfo=UTC),
+                  end=datetime(2026, 6, 29, 4, tzinfo=UTC),
+                  step=timedelta(hours=6), min_error_pairs=5)
+
+    r = CountingReader(candles, fc, obs)
+    evaluate(r, markets, **kwargs)
+
+    # One observation read per distinct as_of actually reached, not one per
+    # (market x as_of x observation) as the uncached path does.
+    n_as_of = len({t for m in markets
+                   for t in calibration._as_of_grid(
+                       kwargs["start"], kwargs["end"], kwargs["step"],
+                       m.resolves_at)})
+    check(r.observation_reads <= n_as_of,
+          f"observation reads not collapsed: {r.observation_reads} > {n_as_of}")
+    check(r.forecast_reads <= n_as_of,
+          f"forecast reads not collapsed: {r.forecast_reads} > {n_as_of}")
+
+    # The read counts above only guard the I/O half. The CPU half — the memo
+    # threaded into _forecast_high, which stops _error_stats re-deriving a
+    # daily high per (observation x market x as_of) — is invisible to them,
+    # because the I/O memo alone already collapses the reads. Count the
+    # per-forecast-row work instead, via the one helper that runs once per row
+    # scanned, and compare against the same study with the memos neutered.
+    calls = {"n": 0}
+    orig_local_date = calibration._local_date
+
+    def counting_local_date(dt, tz):
+        calls["n"] += 1
+        return orig_local_date(dt, tz)
+
+    calibration._local_date = counting_local_date
+    try:
+        evaluate(CountingReader(candles, fc, obs), markets, **kwargs)
+        cached_work = calls["n"]
+
+        calls["n"] = 0
+        orig_init, orig_memo_reader = calibration._StudyMemo.__init__, calibration._MemoReader
+
+        class NullDict(dict):
+            def __setitem__(self, k, v):
+                pass
+
+        def _null_init(self):
+            self.highs, self.stats = NullDict(), NullDict()
+
+        calibration._StudyMemo.__init__ = _null_init
+        calibration._MemoReader = lambda r: r
+        try:
+            evaluate(CountingReader(candles, fc, obs), markets, **kwargs)
+            uncached_work = calls["n"]
+        finally:
+            calibration._StudyMemo.__init__ = orig_init
+            calibration._MemoReader = orig_memo_reader
+    finally:
+        calibration._local_date = orig_local_date
+
+    # The achievable ratio here is bounded by the fixture, not by the memo:
+    # cached work scales with (distinct target dates x as_of), uncached with
+    # (markets x as_of x observations), so 4 markets can only ever show a few
+    # times' reduction. Production scale is where this pays (420 markets x 272
+    # as_of steps). What matters for a regression guard is the qualitative
+    # property: dropping the memo makes the two counts *identical*, so any
+    # real margin catches it while staying insensitive to fixture edits.
+    check(cached_work * 3 // 2 < uncached_work,
+          f"forecast-row work not collapsed: {cached_work} cached vs "
+          f"{uncached_work} uncached (identical counts mean the memo is gone)")
+
+
+# ---------------------------------------------------------------------------
 def main() -> int:
     tests = [
         test_parse_spec_less_from_real_rules,
@@ -567,6 +744,8 @@ def main() -> int:
         test_cli_bad_date_returns_nonzero_before_connect,
         test_cli_verdict_exit_codes,
         test_yes_outcome_helper,
+        test_memoization_matches_uncached_results,
+        test_memoization_actually_collapses_reads,
     ]
     failures = 0
     for t in tests:
