@@ -6,6 +6,17 @@
   [docs/research/2026-07-25-kalshi-category-expansion.md](../../research/2026-07-25-kalshi-category-expansion.md)
   Part 5. **Confirms and generalizes** [ADR-0014](0014-wp7-gate-result-no-go.md).
 
+> **AMENDED 2026-07-26 by [ADR-0017](0017-flb1-gate-bias-is-real-but-not-in-reachable-markets.md),
+> same day.** Everything below was measured against the **public,
+> unauthenticated** API. Bürgi–Deng–Whelan (2026) pulled Kalshi contracts
+> spanning 2021–April 2025 after *registering for API access*, which this probe
+> never did. So the honest scope of this ADR is **"the public unauthenticated
+> API has a ~68-day ceiling"**, not a claim about the venue. If authenticated
+> access reaches deeper, the three candidates killed below come back. **Test
+> before relying on this ADR: get an API key and re-run
+> `scripts/wp0_history_probe.py`.** See ADR-0017 "A threat to ADR-0016" for the
+> three readings consistent with both findings.
+
 ## Decision
 
 **The retrievable-history ceiling is a property of the venue, not of the query
@@ -175,6 +186,9 @@ that, the study returns GO on an arithmetic identity.
 - **It does not prove the ceiling is exactly 68 days or permanent.** It is what
   the venue served on 2026-07-26. It could move. Re-running the probe is cheap
   and is the correct check before reopening any candidate killed here.
+- **It does not test authenticated access.** Every request above was
+  unauthenticated. This is the amendment at the top of this ADR and the single
+  most valuable follow-up, because it could reverse the whole result.
 - **It says nothing about whether the favorite–longshot bias is real.** WP-0
   measured data availability, not returns. The bias magnitude is still the
   unverified extrapolation flagged in the research doc's Part 8 — and that
@@ -190,3 +204,11 @@ is forward paper (6–12 months to a verdict) or stop.** The cheapest thing that
 could still change the picture is retrieving the Bürgi–Deng–Whelan bias table,
 because if the bias in the 0.90–0.99 bucket is under ~0.5 points, FLB-1 should
 not be built even on the fast-market sample.
+
+**Done same day — see [ADR-0017](0017-flb1-gate-bias-is-real-but-not-in-reachable-markets.md).**
+The bias is ~3 points, six times the abort threshold, so FLB-1 is not retired on
+magnitude. But the same paper finds it **absent in mutually-exclusive numerical
+ladders**, which is almost exactly the population this ADR left reachable. And
+it surfaced the authenticated-API threat at the top of this file. The next step
+is now: get an API key and re-run this probe, then run the decile study on the
+weather-ladder data already ingested.
