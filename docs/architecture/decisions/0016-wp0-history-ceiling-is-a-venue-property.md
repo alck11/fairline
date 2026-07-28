@@ -216,6 +216,12 @@ it surfaced the authenticated-API threat at the top of this file.
 
 **Authenticated re-test done 2026-07-28 — see [ADR-0018](0018-authenticated-access-confirms-the-history-ceiling.md).**
 The threat did not materialize: authenticated access hits the identical
-ceiling. The only remaining next step is the decile study on the weather-ladder
-data already ingested, to resolve ADR-0017's Exclusive-Numerical-vs-Climate-and-Weather
-contradiction — after that, the forward-paper-or-stop decision is final.
+ceiling.
+
+**Decile study also done 2026-07-28 — see [ADR-0019](0019-flb1-decile-study-real-but-sub-gate-edge-no-go.md).**
+Resolved ADR-0017's Exclusive-Numerical-vs-Climate-and-Weather contradiction
+(Climate & Weather side: real, statistically overwhelming edge) but the
+measured magnitude (+0.88% net) misses FLB-1's own +1.5% gate. FLB-1 is
+finished. Every candidate this ADR and its follow-ups considered is now
+resolved. **The forward-paper-or-stop fork is the only decision left, and it
+is the user's, not a work package.**

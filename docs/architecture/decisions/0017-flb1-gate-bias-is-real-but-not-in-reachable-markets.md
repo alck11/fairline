@@ -101,6 +101,14 @@ directions, which is reassuring about both.
 
 ### The one unresolved tension, and it is the crux
 
+> **RESOLVED 2026-07-28 by [ADR-0019](0019-flb1-decile-study-real-but-sub-gate-edge-no-go.md).**
+> Our own weather-ladder data sides with Climate & Weather, not Exclusive
+> Numerical: a real, statistically overwhelming positive edge (t=9.4 on 402
+> family-clustered dates), consistently signed across five of six cities. But
+> it's smaller than either cut's implied number and — critically — smaller
+> than FLB-1's own pre-registered +1.5% economic bar (measured: +0.88% net).
+> **NO-GO on magnitude, not on existence.**
+
 Table 8 cuts by *category* instead of structure, and **Climate & Weather is the
 second-largest category at 29,924 observations with `α = −0.997***`,
 `ψ = 0.031***` — break-even 32.2c, +1.69% post-fee taker at 95c.** Favourable.
@@ -206,12 +214,14 @@ Not "build FLB-1".
    2026-07-28, see [ADR-0018](0018-authenticated-access-confirms-the-history-ceiling.md).**
    Did not reopen anything: authenticated access hits the identical ceiling,
    confirmed three independent ways.
-2. **Run the decile study on the weather-ladder data already ingested**
-   (408 KXHIGHNY markets from ADR-0014, extensible to ~16,000), families netted,
-   to resolve the Climate-&-Weather-vs-Exclusive-Numerical contradiction on our
-   actual population. This is FLB-1's gate restricted to the only markets we can
-   reach, and it needs no new data source at all. **This is now the only open
-   item before the forward-paper-or-stop decision.**
+2. ~~Run the decile study on the weather-ladder data already ingested,
+   families netted, to resolve the Climate-&-Weather-vs-Exclusive-Numerical
+   contradiction~~ — **done 2026-07-28, see
+   [ADR-0019](0019-flb1-decile-study-real-but-sub-gate-edge-no-go.md).**
+   Climate & Weather side confirmed, but the measured edge (+0.88% net) falls
+   short of FLB-1's own +1.5% gate. **FLB-1 is finished. The only remaining
+   decision is the forward-paper-or-stop fork from ADR-0016 — not a work
+   package, the user's call.**
 
 If (2) reproduces the `Exclusive Numerical` result, FLB-1 is finished and so is
 the last candidate — at which point the forward-paper-or-stop fork in ADR-0016
