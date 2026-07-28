@@ -147,7 +147,14 @@ overall amount actually invested."* That is the research doc's Part 7 capacity
 finding and ADR-0015's adverse-selection note, from the authors of the anomaly
 itself. The measured returns are an **upper bound** on what a real book earns.
 
-## A threat to ADR-0016, found while doing this
+## A threat to ADR-0016, found while doing this — resolved 2026-07-28
+
+> **RESOLVED by [ADR-0018](0018-authenticated-access-confirms-the-history-ceiling.md).**
+> Reading 1 below was tested directly — the user generated a Kalshi API key
+> for this purpose — and falsified: authenticated access hits the identical
+> ceiling, confirmed three independent ways. Readings 2 and 3 remain the live
+> explanations but neither is actionable. Left as originally written below for
+> the record of what was uncertain at the time.
 
 Recorded prominently because it cuts against a conclusion this project reached
 one commit ago, and I would rather flag it than defend the ADR.
@@ -193,15 +200,18 @@ measured — rather than as a statement about the venue.
 
 ## Recommended next step
 
-Not "build FLB-1". Two cheaper things, in order:
+Not "build FLB-1".
 
-1. **Re-run the WP-0 probe with an authenticated API key.** It is the only item
-   that could reopen three dead candidates, and it costs a registration.
+1. ~~Re-run the WP-0 probe with an authenticated API key~~ — **done
+   2026-07-28, see [ADR-0018](0018-authenticated-access-confirms-the-history-ceiling.md).**
+   Did not reopen anything: authenticated access hits the identical ceiling,
+   confirmed three independent ways.
 2. **Run the decile study on the weather-ladder data already ingested**
    (408 KXHIGHNY markets from ADR-0014, extensible to ~16,000), families netted,
    to resolve the Climate-&-Weather-vs-Exclusive-Numerical contradiction on our
    actual population. This is FLB-1's gate restricted to the only markets we can
-   reach, and it needs no new data source at all.
+   reach, and it needs no new data source at all. **This is now the only open
+   item before the forward-paper-or-stop decision.**
 
 If (2) reproduces the `Exclusive Numerical` result, FLB-1 is finished and so is
 the last candidate — at which point the forward-paper-or-stop fork in ADR-0016

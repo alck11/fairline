@@ -53,14 +53,20 @@ required; no auth). Fixture-based, network-free tests live in
 tests/test_ingest_kalshi.py.
 """
 from __future__ import annotations
+import base64
 import json
+import os
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Sequence
+
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from ingest import BookSnapshot, Candle, MarketRow, OutcomeRef, ResolutionRow
 
@@ -104,17 +110,83 @@ class KalshiAPIError(RuntimeError):
     (ADR-0006 / US-2)."""
 
 
+@dataclass(frozen=True)
+class KalshiCredentials:
+    """An API key id plus the RSA private key that signs requests for it
+    (ADR-0018). Kalshi's auth is signature-based, not a bearer token: every
+    request carries KALSHI-ACCESS-KEY/-TIMESTAMP/-SIGNATURE headers, where the
+    signature is an RSA-PSS (SHA-256, MGF1-SHA256, salt length = digest size)
+    signature over `f"{timestamp_ms}{method}{path}"` — `path` includes the
+    `/trade-api/v2` prefix and excludes the query string (Kalshi's documented
+    spec, confirmed 2026-07-27 against docs.kalshi.com and by a live signed
+    call to GET /portfolio/balance returning 200). The private key never
+    leaves this process; only the signature is sent."""
+
+    key_id: str
+    private_key: rsa.RSAPrivateKey
+
+    @classmethod
+    def from_env(cls, *, key_id_var: str = "KALSHI_API_KEY_ID",
+                 key_path_var: str = "KALSHI_PRIVATE_KEY_PATH") -> "KalshiCredentials":
+        """Reads a key id and a path to a PEM-encoded RSA private key from
+        the environment (repo convention: `export`ed from `.env`, matching
+        store.py's DATABASE_URL — this module does not auto-source `.env`).
+        Raises ValueError with the missing variable's name rather than a bare
+        KeyError, since a caller opting into authenticated access should get
+        a message that says what to set, not a stack trace."""
+        key_id = os.environ.get(key_id_var)
+        key_path = os.environ.get(key_path_var)
+        if not key_id:
+            raise ValueError(f"{key_id_var} is not set in the environment")
+        if not key_path:
+            raise ValueError(f"{key_path_var} is not set in the environment")
+        key_path = os.path.expanduser(key_path)
+        with open(key_path, "rb") as f:
+            private_key = serialization.load_pem_private_key(f.read(), password=None)
+        if not isinstance(private_key, rsa.RSAPrivateKey):
+            raise ValueError(
+                f"{key_path_var} ({key_path!r}) is not an RSA private key "
+                f"(got {type(private_key).__name__}) — Kalshi's API requires RSA")
+        return cls(key_id=key_id, private_key=private_key)
+
+    def sign(self, method: str, path: str) -> tuple[str, str]:
+        """Returns (timestamp_ms_str, base64_signature) for one request."""
+        ts = str(int(time.time() * 1000))
+        message = f"{ts}{method}{path}".encode("utf-8")
+        signature = self.private_key.sign(
+            message,
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                       salt_length=hashes.SHA256().digest_size),
+            hashes.SHA256(),
+        )
+        return ts, base64.b64encode(signature).decode("utf-8")
+
+
 class KalshiSource:
     """MarketDataSource implementation over Kalshi's public REST API. Data
     only — no order placement anywhere in this class, and none of its
-    methods ever will (ADR-0006's data/execution split)."""
+    methods ever will (ADR-0006's data/execution split).
+
+    `credentials` is optional (ADR-0018): every endpoint this class uses is
+    also reachable unauthenticated, but ADR-0016 found the unauthenticated
+    settled-market history capped at ~68 days and could not rule out that
+    authenticated access reaches deeper — pass `KalshiCredentials.from_env()`
+    to test that. When set, every request is signed; Kalshi's public
+    endpoints accept signed requests identically to unsigned ones, so this is
+    safe to pass unconditionally once you have a key."""
 
     def __init__(self, base_url: str = DEFAULT_BASE_URL, *, timeout: float = 15.0,
-                 max_retries: int = 4, backoff: float = 1.0):
+                 max_retries: int = 4, backoff: float = 1.0,
+                 credentials: KalshiCredentials | None = None):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.max_retries = max_retries
         self.backoff = backoff
+        self.credentials = credentials
+        # the URL path Kalshi's signature covers includes the /trade-api/v2
+        # prefix carried in base_url, but not the host -- computed once here
+        # rather than re-parsed per request.
+        self._sign_path_prefix = urllib.parse.urlsplit(self.base_url).path
         # ticker -> series_ticker, populated as a side effect of list_markets
         # (each event already carries series_ticker) and by candlesticks()'s
         # own lookup on a cache miss — avoids two extra round trips per call
@@ -129,7 +201,22 @@ class KalshiSource:
             url += "?" + urllib.parse.urlencode(query)
         last_err: Exception | None = None
         for attempt in range(self.max_retries):
-            req = urllib.request.Request(url, headers={"Accept": "application/json"})
+            headers = {"Accept": "application/json"}
+            if self.credentials is not None:
+                # Re-signed on every attempt, inside the loop: Kalshi checks
+                # the timestamp against a tight freshness window, and a retry
+                # after exponential backoff can be seconds later than the
+                # first attempt -- a signature computed once before the loop
+                # would go stale and every retry would fail authentication
+                # (a real bug the request-body-outside-loop shape below does
+                # NOT share, since GET carries no body).
+                # Signed over the path WITHOUT the query string (Kalshi's
+                # documented spec) -- `path` here, not `url`.
+                ts, sig = self.credentials.sign("GET", self._sign_path_prefix + path)
+                headers["KALSHI-ACCESS-KEY"] = self.credentials.key_id
+                headers["KALSHI-ACCESS-TIMESTAMP"] = ts
+                headers["KALSHI-ACCESS-SIGNATURE"] = sig
+            req = urllib.request.Request(url, headers=headers)
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     body = json.loads(resp.read())

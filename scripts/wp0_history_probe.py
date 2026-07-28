@@ -26,14 +26,24 @@ point of this probe is to not take the docs' word for any of it:
       ~38h KXHIGHNY window was measured off candlesticks; `open_time` gives it
       directly, so this both cross-checks that measurement and prices MRAIN-1.
 
-Read-only, public endpoints, no auth, no database. Builds on
-`KalshiSource._get` rather than reimplementing HTTP: this probe needs endpoints
-and query params `KalshiSource` deliberately does not expose (`/markets` with
-`series_ticker`/`min_close_ts`, `/markets/trades`), but it wants that class's
-retry/backoff and its KalshiAPIError contract (ADR-0006/US-2).
+Read-only, no database. Builds on `KalshiSource._get` rather than
+reimplementing HTTP: this probe needs endpoints and query params `KalshiSource`
+deliberately does not expose (`/markets` with `series_ticker`/`min_close_ts`,
+`/markets/trades`), but it wants that class's retry/backoff and its
+KalshiAPIError contract (ADR-0006/US-2).
 
-    python3 scripts/wp0_history_probe.py                  # full probe
-    python3 scripts/wp0_history_probe.py --json out.json   # + raw dump
+Unauthenticated by default. `--auth` signs every request with
+`KalshiCredentials.from_env()` (ADR-0018) to test the open question this
+probe's first run could not close: ADR-0016 measured a ~68-day settled-history
+ceiling against the *public* API, but Bürgi-Deng-Whelan (2026) pulled
+2021-2025 Kalshi history after *registering for API access* — so it was never
+established whether that ceiling is a venue property or an unauthenticated-tier
+property. `--auth` re-runs the identical Q1/Q2/Q3 comparison authenticated so
+the two runs are directly diffable.
+
+    python3 scripts/wp0_history_probe.py                  # unauthenticated
+    python3 scripts/wp0_history_probe.py --auth            # authenticated
+    python3 scripts/wp0_history_probe.py --auth --json out.json
 """
 from __future__ import annotations
 import argparse
@@ -45,7 +55,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from ingest_kalshi import KalshiAPIError, KalshiSource   # noqa: E402
+from ingest_kalshi import KalshiAPIError, KalshiCredentials, KalshiSource   # noqa: E402
 
 # Series probed, chosen to separate "venue ceiling" from "query-path ceiling":
 # a daily ladder resolves ~365x/yr so a 68-day window still yields a usable
@@ -231,13 +241,19 @@ def listing_windows(markets: list[dict]) -> dict | None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--json", help="write the raw probe result to this path")
+    ap.add_argument("--auth", action="store_true",
+                    help="sign requests with KalshiCredentials.from_env() "
+                         "(KALSHI_API_KEY_ID / KALSHI_PRIVATE_KEY_PATH)")
     args = ap.parse_args()
 
-    src = KalshiSource()
+    credentials = KalshiCredentials.from_env() if args.auth else None
+    src = KalshiSource(credentials=credentials)
     now = datetime.now(timezone.utc)
-    report: dict = {"probed_at": now.isoformat(), "q1": [], "q2": [], "q3": []}
+    report: dict = {"probed_at": now.isoformat(), "authenticated": args.auth,
+                    "q1": [], "q2": [], "q3": []}
 
-    print(f"WP-0 history probe — {now:%Y-%m-%d %H:%M} UTC")
+    print(f"WP-0 history probe — {now:%Y-%m-%d %H:%M} UTC "
+          f"({'AUTHENTICATED' if args.auth else 'unauthenticated'})")
     print(f"base: {src.base_url}\n")
 
     # -- Q1 ------------------------------------------------------------------
@@ -336,4 +352,9 @@ if __name__ == "__main__":
         sys.exit(main())
     except KalshiAPIError as e:
         print(f"Kalshi API failure: {e}")
+        sys.exit(1)
+    except ValueError as e:
+        # KalshiCredentials.from_env() raises this on a missing/malformed
+        # env var or key file -- surface it plainly rather than a traceback.
+        print(f"--auth failed to load credentials: {e}")
         sys.exit(1)

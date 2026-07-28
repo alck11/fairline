@@ -6,16 +6,18 @@
   [docs/research/2026-07-25-kalshi-category-expansion.md](../../research/2026-07-25-kalshi-category-expansion.md)
   Part 5. **Confirms and generalizes** [ADR-0014](0014-wp7-gate-result-no-go.md).
 
-> **AMENDED 2026-07-26 by [ADR-0017](0017-flb1-gate-bias-is-real-but-not-in-reachable-markets.md),
-> same day.** Everything below was measured against the **public,
-> unauthenticated** API. Bürgi–Deng–Whelan (2026) pulled Kalshi contracts
-> spanning 2021–April 2025 after *registering for API access*, which this probe
-> never did. So the honest scope of this ADR is **"the public unauthenticated
-> API has a ~68-day ceiling"**, not a claim about the venue. If authenticated
-> access reaches deeper, the three candidates killed below come back. **Test
-> before relying on this ADR: get an API key and re-run
-> `scripts/wp0_history_probe.py`.** See ADR-0017 "A threat to ADR-0016" for the
-> three readings consistent with both findings.
+> **AMENDED 2026-07-26 by [ADR-0017](0017-flb1-gate-bias-is-real-but-not-in-reachable-markets.md):**
+> everything below was measured against the public, unauthenticated API, and
+> ADR-0017 flagged that Bürgi–Deng–Whelan (2026) pulled 2021–April 2025 history
+> after registering for API access — raising the question of whether
+> authenticated access reaches deeper.
+>
+> **RESOLVED 2026-07-28 by [ADR-0018](0018-authenticated-access-confirms-the-history-ceiling.md):
+> no.** The probe was re-run authenticated (RSA-PSS signed, real Kalshi API
+> key) and returned the identical ~66–68 day window and identical zero
+> markets for the long-dated series — confirmed three independent ways,
+> including two that bypass pagination entirely. This ADR's conclusions stand
+> without qualification; the escape hatch is closed.
 
 ## Decision
 
@@ -186,9 +188,10 @@ that, the study returns GO on an arithmetic identity.
 - **It does not prove the ceiling is exactly 68 days or permanent.** It is what
   the venue served on 2026-07-26. It could move. Re-running the probe is cheap
   and is the correct check before reopening any candidate killed here.
-- **It does not test authenticated access.** Every request above was
-  unauthenticated. This is the amendment at the top of this ADR and the single
-  most valuable follow-up, because it could reverse the whole result.
+- **It does not test authenticated access** on its own — every request above
+  was unauthenticated. This was the amendment at the top of this ADR; it is
+  now resolved by [ADR-0018](0018-authenticated-access-confirms-the-history-ceiling.md),
+  which found the identical ceiling authenticated.
 - **It says nothing about whether the favorite–longshot bias is real.** WP-0
   measured data availability, not returns. The bias magnitude is still the
   unverified extrapolation flagged in the research doc's Part 8 — and that
@@ -209,6 +212,10 @@ not be built even on the fast-market sample.
 The bias is ~3 points, six times the abort threshold, so FLB-1 is not retired on
 magnitude. But the same paper finds it **absent in mutually-exclusive numerical
 ladders**, which is almost exactly the population this ADR left reachable. And
-it surfaced the authenticated-API threat at the top of this file. The next step
-is now: get an API key and re-run this probe, then run the decile study on the
-weather-ladder data already ingested.
+it surfaced the authenticated-API threat at the top of this file.
+
+**Authenticated re-test done 2026-07-28 — see [ADR-0018](0018-authenticated-access-confirms-the-history-ceiling.md).**
+The threat did not materialize: authenticated access hits the identical
+ceiling. The only remaining next step is the decile study on the weather-ladder
+data already ingested, to resolve ADR-0017's Exclusive-Numerical-vs-Climate-and-Weather
+contradiction — after that, the forward-paper-or-stop decision is final.
