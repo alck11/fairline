@@ -1,6 +1,6 @@
 # ADR-0021 — cross-city forecast-error correlation checked against NOAA/IEM data: mixed, not decisive
 
-- **Status:** Accepted
+- **Status:** Accepted — **premise partially corrected 2026-07-28 by [ADR-0023](0023-historical-tier-retracts-the-68-day-ceiling.md)**: this ADR's conclusion that estimating true bust frequency "requires forward observation, not a longer look at Kalshi's own settled-market history, which the venue simply does not retain past ~68 days" is wrong on that last clause — `/historical/markets` retains 5 years for `KXHIGHNY`. The 88-day/one-season correlation measurement below stands as far as it goes; it just isn't the ceiling on what's checkable.
 - **Date:** 2026-07-28
 - **Follows:** [ADR-0020](0020-flb1-tail-risk-is-concentrated-and-unmeasurable-from-68-days.md) —
   runs the check that ADR-0020 flagged as answerable now, without new Kalshi

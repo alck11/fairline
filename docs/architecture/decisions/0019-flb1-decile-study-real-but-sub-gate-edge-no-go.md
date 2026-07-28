@@ -1,6 +1,6 @@
 # ADR-0019 — FLB-1's own gate, run on our data: a real, rock-solid, too-small edge — NO-GO, and it resolves ADR-0017's crux
 
-- **Status:** Accepted
+- **Status:** Accepted — **data premise corrected 2026-07-28 by [ADR-0023](0023-historical-tier-retracts-the-68-day-ceiling.md)**: this study ran on 68 days / 2,411 live-tier markets. `KXHIGHNY` alone has 8,896 markets across 5 years via `/historical/markets`, with real traded prices confirmed. The methodology and the +0.88%-vs-1.5% NO-GO stand as a measurement on the sample used; re-running against the full historical population would sharpen it and is now possible without forward-paper.
 - **Date:** 2026-07-28
 - **Resolves:** [ADR-0017](0017-flb1-gate-bias-is-real-but-not-in-reachable-markets.md)'s
   open crux — does Kalshi weather ladders behave like Bürgi-Deng-Whelan's

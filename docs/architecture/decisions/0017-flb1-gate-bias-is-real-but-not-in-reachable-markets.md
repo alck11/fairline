@@ -1,6 +1,6 @@
 # ADR-0017 — FLB-1 gate: the favorite–longshot bias clears the abort threshold, but the paper's own cut says it is absent from the markets WP-0 leaves us
 
-- **Status:** Accepted
+- **Status:** Accepted — **data premise corrected 2026-07-28 by [ADR-0023](0023-historical-tier-retracts-the-68-day-ceiling.md)**: "the only markets WP-0 leaves us" understated what's reachable via `/historical/*`. The paper-comparison methodology and Table-4-vs-Table-8 contradiction below are unaffected; the "4 resolved markets across 3 series" basket count is likely a live-tier undercount, not re-verified.
 - **Date:** 2026-07-26
 - **Resolves:** the pre-condition in
   [docs/research/2026-07-25-kalshi-category-expansion.md](../../research/2026-07-25-kalshi-category-expansion.md)

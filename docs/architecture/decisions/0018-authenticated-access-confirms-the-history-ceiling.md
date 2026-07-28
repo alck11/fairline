@@ -1,6 +1,6 @@
 # ADR-0018 — Kalshi RSA-PSS auth added; authenticated access confirms the history ceiling, closing ADR-0017's open threat
 
-- **Status:** Accepted
+- **Status:** **PARTIALLY RETRACTED 2026-07-28 by [ADR-0023](0023-historical-tier-retracts-the-68-day-ceiling.md)** — the auth mechanism (`KalshiCredentials`) is sound and stands; the "ceiling confirmed" conclusion does not
 - **Date:** 2026-07-27/28
 - **Resolves:** the "threat to ADR-0016" in
   [ADR-0017](0017-flb1-gate-bias-is-real-but-not-in-reachable-markets.md) —
@@ -8,6 +8,17 @@
   access that reaches deeper than the public tier ADR-0016 tested.
 - **Adds:** `KalshiCredentials` to `src/ingest_kalshi.py`; `--auth` to
   `scripts/wp0_history_probe.py`.
+
+> **PARTIALLY RETRACTED 2026-07-28 — see [ADR-0023](0023-historical-tier-retracts-the-68-day-ceiling.md).**
+> This ADR correctly showed that *authentication* doesn't change live-tier
+> depth — that finding stands. It incorrectly concluded from that result that
+> the ~68-day ceiling was a fixed venue property with "no remaining
+> technical escape hatch." The escape hatch was a different endpoint family
+> (`/historical/*`) that this ADR's re-run never queried, because it re-ran
+> the same live-tier query shape with auth headers attached rather than
+> trying a genuinely different route. `KalshiCredentials` itself (the RSA-PSS
+> signing mechanism) is correct and unaffected — only the "ceiling confirmed"
+> conclusion below is retracted.
 
 ## Decision
 

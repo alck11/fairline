@@ -1,10 +1,21 @@
 # ADR-0016 — WP-0 result: Kalshi's ~68-day history ceiling is a venue property; three of five candidates are dead on arrival
 
-- **Status:** Accepted
+- **Status:** **RETRACTED 2026-07-28 by [ADR-0023](0023-historical-tier-retracts-the-68-day-ceiling.md)** — this ADR's central claim was wrong; see below before reading further
 - **Date:** 2026-07-26
 - **Gates:** every backtest-shaped candidate in
   [docs/research/2026-07-25-kalshi-category-expansion.md](../../research/2026-07-25-kalshi-category-expansion.md)
   Part 5. **Confirms and generalizes** [ADR-0014](0014-wp7-gate-result-no-go.md).
+
+> **RETRACTED 2026-07-28 — see [ADR-0023](0023-historical-tier-retracts-the-68-day-ceiling.md).**
+> Every test in this ADR queried Kalshi's *live-tier* endpoints only
+> (`/markets`, `/events`). Kalshi separately documents a `/historical/*`
+> endpoint family for older data, confirmed live to reach back to **Kalshi's
+> 2021 inception** with real traded prices — not ~68 days. `KXNOBELPEACE` and
+> `KXHURCTOT`, declared dead below with **zero** resolved markets, have 24 and
+> 28 respectively via `/historical/markets`. MRAIN-1 in particular reopens
+> substantially (one rain series alone: 27 independent events vs. the "1
+> resolved monthly cycle" below). **Read ADR-0023 before acting on anything in
+> this document.**
 
 > **AMENDED 2026-07-26 by [ADR-0017](0017-flb1-gate-bias-is-real-but-not-in-reachable-markets.md):**
 > everything below was measured against the public, unauthenticated API, and

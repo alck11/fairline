@@ -1,6 +1,6 @@
 # ADR-0020 — FLB-1's losses are concentrated in one thin series and one weather event; the real blocker is unmeasured tail risk, not the ROI threshold
 
-- **Status:** Accepted
+- **Status:** Accepted — **premise partially corrected 2026-07-28 by [ADR-0023](0023-historical-tier-retracts-the-68-day-ceiling.md)**: this ADR's framing that "68 days of one summer cannot contain enough [tail] events" assumed 68 days was the retrievable limit. `/historical/markets` reaches 5 years back for `KXHIGHNY`, spanning many seasons — the tail-risk question below is likely directly answerable now, not stuck waiting on forward paper. The concentration finding itself (3/3 losses on KXLOWTBOS, 2 same date) is a fact about the sample already measured and is unaffected.
 - **Date:** 2026-07-28
 - **Follows:** [ADR-0019](0019-flb1-decile-study-real-but-sub-gate-edge-no-go.md) —
   answers the user's direct pushback on that ADR's verdict: *"we cannot trade
