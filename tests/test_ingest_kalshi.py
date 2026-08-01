@@ -350,6 +350,249 @@ def test_candlesticks_invalid_period_no_network():
 
 
 # ---------------------------------------------------------------------------
+# historical tier (ADR-0023 / ADR-0028) — the archive behind the live tier's
+# ~2-month settled window. Fixtures are real API responses captured live
+# 2026-08-01 (KXRAINNYCM), so the field-naming difference between the two
+# candlestick endpoints is frozen from ground truth, not hand-written.
+# ---------------------------------------------------------------------------
+def historical_router(path, query):
+    if path == "/historical/markets":
+        return _load("historical_markets_rain.json")
+    if path.startswith("/historical/markets/") and path.endswith("/candlesticks"):
+        return _load("historical_candlesticks.json")
+    raise AssertionError(f"unmocked historical path: {path}")
+
+
+def test_historical_candles_are_not_silently_zeroed():
+    """THE regression this whole code path exists for.
+
+    Kalshi's historical candlestick endpoint names its price fields `close`,
+    `open`, ... while the live-tier endpoint uses `close_dollars`,
+    `open_dollars`, ... Parsing historical bars with the live-tier names
+    returns None for every price — which is precisely how Kalshi encodes 'no
+    trades in this bar' — so the code falls through to the yes_bid/yes_ask
+    midpoint fallback, whose lookups miss for the same reason and resolve to
+    0.0 via `or 0`. Result before the fix: a full series of zero-priced
+    candles, stored with NO exception raised anywhere.
+
+    The fixture is a real 2024 bar whose true close is 0.04. If this test ever
+    reads 0.0, the silent-corruption path is back."""
+    calls, restore = install_fixture_router(historical_router)
+    try:
+        src = KalshiSource()
+        candles = src.candlesticks("RAINNYCM-24FEB-6-YES",
+                                   start=datetime(2024, 1, 21, tzinfo=timezone.utc),
+                                   end=datetime(2024, 3, 1, tzinfo=timezone.utc),
+                                   period="1d", historical=True)
+    finally:
+        restore()
+    check(len(candles) == 4, f"expected 4 bars from the fixture, got {len(candles)}")
+    closes = [c.close for c in candles]
+    check(all(c not in (0.0, None) for c in closes),
+          f"historical candle closes must not be zeroed: {closes}")
+    check(candles[0].close == 0.05, f"first bar close should be 0.05: {candles[0].close}")
+    check(candles[1].close == 0.04, f"second bar close should be 0.04: {candles[1].close}")
+    check(candles[1].volume == 1.0,
+          f"volume must be read from the historical `volume` key: {candles[1].volume}")
+
+
+def test_historical_candles_use_historical_endpoint():
+    """historical=True must hit /historical/..., and must NOT make the two
+    extra /markets + /events round trips the live path needs to resolve
+    series_ticker (the historical endpoint is addressed by ticker alone)."""
+    calls, restore = install_fixture_router(historical_router)
+    try:
+        KalshiSource().candlesticks(
+            "RAINNYCM-24FEB-6-YES",
+            start=datetime(2024, 1, 21, tzinfo=timezone.utc),
+            end=datetime(2024, 3, 1, tzinfo=timezone.utc),
+            period="1d", historical=True)
+    finally:
+        restore()
+    paths = [p for p, _ in calls]
+    check(paths == ["/historical/markets/RAINNYCM-24FEB-6/candlesticks"],
+          f"exactly one historical candlestick call expected, got {paths}")
+
+
+def test_historical_no_side_is_complement():
+    calls, restore = install_fixture_router(historical_router)
+    try:
+        src = KalshiSource()
+        yes = src.candlesticks("RAINNYCM-24FEB-6-YES",
+                               start=datetime(2024, 1, 21, tzinfo=timezone.utc),
+                               end=datetime(2024, 3, 1, tzinfo=timezone.utc),
+                               period="1d", historical=True)
+        no = src.candlesticks("RAINNYCM-24FEB-6-NO",
+                              start=datetime(2024, 1, 21, tzinfo=timezone.utc),
+                              end=datetime(2024, 3, 1, tzinfo=timezone.utc),
+                              period="1d", historical=True)
+    finally:
+        restore()
+    for y, n in zip(yes, no):
+        check(abs((y.close + n.close) - 1.0) < 1e-9,
+              f"YES+NO close must sum to 1: {y.close} + {n.close}")
+        check(abs(n.high - (1.0 - y.low)) < 1e-9, "NO high must invert YES low")
+
+
+def test_unknown_candle_shape_fails_loud():
+    """If Kalshi renames the price fields again, refuse to parse — do not
+    silently degrade to the midpoint/zero path this module was bitten by."""
+    def router(path, query):
+        return {"ticker": "X", "candlesticks": [{
+            "end_period_ts": 1707541200,
+            "price": {"closing_price": "0.04"},   # neither known spelling
+            "volume": "1.00",
+        }]}
+    calls, restore = install_fixture_router(router)
+    try:
+        KalshiSource().candlesticks("X-YES",
+                                    start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                                    end=datetime(2024, 2, 1, tzinfo=timezone.utc),
+                                    period="1d", historical=True)
+        raise AssertionError("an unrecognized candle shape must raise")
+    except KalshiAPIError as e:
+        # 'open' is the first field parsed, so it is the one reported; the
+        # message must also say which spellings were tried and what was there.
+        check("'open'" in str(e), f"error should name the missing field: {e}")
+        check("closing_price" in str(e),
+              f"error should show the keys actually present: {e}")
+    finally:
+        restore()
+
+
+def test_quiet_bar_with_only_previous_price_is_not_an_unknown_shape():
+    """A live-tier bar in which nothing traded omits its OHLC keys entirely
+    and carries ONLY `previous_dollars` — confirmed live. That is an ordinary
+    quiet bar, not a changed schema: it must take the bid/ask midpoint
+    fallback, not raise. (Caught by running the real live endpoint against a
+    first draft of the shape guard, which rejected it.)"""
+    def router(path, query):
+        # the live-tier path resolves series_ticker first (two round trips)
+        if path == "/markets/X":
+            return {"market": {"ticker": "X", "event_ticker": "E"}}
+        if path == "/events/E":
+            return {"event": {"series_ticker": "KXTEST"}}
+        return {"ticker": "X", "candlesticks": [{
+            "end_period_ts": 1785556800,
+            "price": {"previous_dollars": "0.0100"},
+            "volume_fp": "0.00",
+            "yes_bid": {"close_dollars": "0.0200", "high_dollars": "0.0200",
+                        "low_dollars": "0.0200", "open_dollars": "0.0200"},
+            "yes_ask": {"close_dollars": "0.0400", "high_dollars": "0.0400",
+                        "low_dollars": "0.0400", "open_dollars": "0.0400"},
+        }]}
+    calls, restore = install_fixture_router(router)
+    try:
+        candles = KalshiSource().candlesticks(
+            "X-YES", start=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            end=datetime(2026, 8, 1, tzinfo=timezone.utc), period="1d")
+    finally:
+        restore()
+    check(len(candles) == 1, f"the quiet bar must still be emitted: {candles}")
+    check(abs(candles[0].close - 0.03) < 1e-9,
+          f"close should be the 0.02/0.04 bid-ask midpoint: {candles[0].close}")
+
+
+def test_historical_markets_returns_markets_and_resolutions():
+    """The historical listing carries `result` inline, so resolutions come
+    back with the markets — no second batch call needed (the live-tier flow
+    needs one; here it would be hundreds of wasted round trips)."""
+    calls, restore = install_fixture_router(historical_router)
+    try:
+        markets, resolutions = KalshiSource().historical_markets(
+            "KXRAINNYCM", category="weather")
+    finally:
+        restore()
+    check(len(markets) == 3, f"expected 3 markets from the fixture: {len(markets)}")
+    check(len(resolutions) == 6, f"expected 2 resolutions per market: {len(resolutions)}")
+    check(all(m.venue == "kalshi" and m.category == "weather" for m in markets),
+          "markets must be tagged with the caller-supplied category")
+    check(all(m.resolution_text for m in markets),
+          "rules_primary must survive as resolution_text (the study parses it)")
+    # every market contributes exactly one YES and one NO, summing to 1.0
+    by_ticker = {}
+    for r in resolutions:
+        by_ticker.setdefault(r.external_id, []).append(r.resolved_value)
+    check(all(abs(sum(v) - 1.0) < 1e-9 for v in by_ticker.values()),
+          f"each market's YES+NO resolved_values must sum to 1: {by_ticker}")
+    check(len(by_ticker) == 3, f"expected 3 distinct tickers: {sorted(by_ticker)}")
+
+
+def test_historical_markets_rejects_unknown_category():
+    """No network: the category guard runs before any request."""
+    try:
+        KalshiSource().historical_markets("KXRAINNYCM", category="sports")
+        raise AssertionError("unknown category must raise ValueError")
+    except ValueError as e:
+        check("sports" in str(e), f"error should name the bad category: {e}")
+
+
+def test_historical_markets_skips_unresolved_rows():
+    """The archive should hold only settled markets, but an unresolved row
+    must never become a ResolutionRow asserting a settlement that never
+    happened."""
+    def router(path, query):
+        return {"markets": [
+            {"ticker": "T-1", "event_ticker": "E", "status": "active",
+             "result": "", "title": "open one", "rules_primary": "r"},
+            {"ticker": "T-2", "event_ticker": "E", "status": "finalized",
+             "result": "yes", "title": "settled one", "rules_primary": "r"},
+        ], "cursor": ""}
+    calls, restore = install_fixture_router(router)
+    try:
+        markets, resolutions = KalshiSource().historical_markets(
+            "KXTEST", category="weather")
+    finally:
+        restore()
+    check([m.external_id for m in markets] == ["T-2"],
+          f"only the settled market may be returned: {[m.external_id for m in markets]}")
+    check(len(resolutions) == 2, f"only T-2's two sides: {resolutions}")
+
+
+def test_historical_markets_repeated_cursor_raises():
+    """Stuck pagination must fail loud rather than loop — same guard
+    list_markets carries."""
+    def router(path, query):
+        return {"markets": [{"ticker": "T-1", "event_ticker": "E",
+                             "status": "finalized", "result": "yes",
+                             "title": "t", "rules_primary": "r"}],
+                "cursor": "SAME"}
+    calls, restore = install_fixture_router(router)
+    try:
+        KalshiSource().historical_markets("KXTEST", category="weather")
+        raise AssertionError("a repeated cursor must raise")
+    except KalshiAPIError as e:
+        check("cursor" in str(e).lower(), f"error should mention the cursor: {e}")
+    finally:
+        restore()
+
+
+def test_historical_markets_paginates_to_exhaustion():
+    pages = {"n": 0}
+
+    def router(path, query):
+        pages["n"] += 1
+        if pages["n"] == 1:
+            return {"markets": [{"ticker": "T-1", "event_ticker": "E",
+                                 "status": "finalized", "result": "yes",
+                                 "title": "t", "rules_primary": "r"}],
+                    "cursor": "PAGE2"}
+        return {"markets": [{"ticker": "T-2", "event_ticker": "E",
+                             "status": "finalized", "result": "no",
+                             "title": "t", "rules_primary": "r"}],
+                "cursor": ""}
+    calls, restore = install_fixture_router(router)
+    try:
+        markets, _ = KalshiSource().historical_markets("KXTEST", category="weather")
+    finally:
+        restore()
+    check(sorted(m.external_id for m in markets) == ["T-1", "T-2"],
+          f"both pages must be collected: {[m.external_id for m in markets]}")
+    check(calls[1][1].get("cursor") == "PAGE2",
+          f"page 2 must be requested with the returned cursor: {calls[1][1]}")
+
+
+# ---------------------------------------------------------------------------
 # resolutions — two ResolutionRows per settled market (YES + NO outcomes)
 # ---------------------------------------------------------------------------
 def test_resolutions_two_sided():
@@ -1242,6 +1485,16 @@ def main() -> int:
         test_candlesticks_yes_side_and_series_cache,
         test_candlesticks_no_side_is_complement,
         test_candlesticks_invalid_period_no_network,
+        test_historical_candles_are_not_silently_zeroed,
+        test_historical_candles_use_historical_endpoint,
+        test_historical_no_side_is_complement,
+        test_unknown_candle_shape_fails_loud,
+        test_quiet_bar_with_only_previous_price_is_not_an_unknown_shape,
+        test_historical_markets_returns_markets_and_resolutions,
+        test_historical_markets_rejects_unknown_category,
+        test_historical_markets_skips_unresolved_rows,
+        test_historical_markets_repeated_cursor_raises,
+        test_historical_markets_paginates_to_exhaustion,
         test_resolutions_two_sided,
         test_resolutions_empty_input_no_network,
         test_resolutions_null_ticker_raises_kalshi_api_error,

@@ -1,0 +1,105 @@
+{
+ "candlesticks": [
+  {
+   "end_period_ts": 1707454800,
+   "open_interest": "51.00",
+   "price": {
+    "close": "0.0500",
+    "high": "0.0500",
+    "low": "0.0500",
+    "mean": "0.0500",
+    "open": "0.0500",
+    "previous": null
+   },
+   "volume": "51.00",
+   "yes_ask": {
+    "close": "0.0400",
+    "high": "1.0000",
+    "low": "0.0400",
+    "open": "1.0000"
+   },
+   "yes_bid": {
+    "close": "0.0300",
+    "high": "0.0700",
+    "low": "0.0000",
+    "open": "0.0400"
+   }
+  },
+  {
+   "end_period_ts": 1707541200,
+   "open_interest": "52.00",
+   "price": {
+    "close": "0.0400",
+    "high": "0.0400",
+    "low": "0.0400",
+    "mean": "0.0400",
+    "open": "0.0400",
+    "previous": "0.0500"
+   },
+   "volume": "1.00",
+   "yes_ask": {
+    "close": "0.0700",
+    "high": "1.0000",
+    "low": "0.0400",
+    "open": "0.0400"
+   },
+   "yes_bid": {
+    "close": "0.0300",
+    "high": "0.0500",
+    "low": "0.0000",
+    "open": "0.0300"
+   }
+  },
+  {
+   "end_period_ts": 1707627600,
+   "open_interest": "52.00",
+   "price": {
+    "close": null,
+    "high": null,
+    "low": null,
+    "mean": null,
+    "open": null,
+    "previous": "0.0400"
+   },
+   "volume": "0.00",
+   "yes_ask": {
+    "close": "0.0900",
+    "high": "1.0000",
+    "low": "0.0700",
+    "open": "0.0700"
+   },
+   "yes_bid": {
+    "close": "0.0400",
+    "high": "0.0400",
+    "low": "0.0000",
+    "open": "0.0300"
+   }
+  },
+  {
+   "end_period_ts": 1707714000,
+   "open_interest": "52.00",
+   "price": {
+    "close": null,
+    "high": null,
+    "low": null,
+    "mean": null,
+    "open": null,
+    "previous": "0.0400"
+   },
+   "volume": "0.00",
+   "yes_ask": {
+    "close": "0.0800",
+    "high": "1.0000",
+    "low": "0.0800",
+    "open": "0.0900"
+   },
+   "yes_bid": {
+    "close": "0.0400",
+    "high": "0.0500",
+    "low": "0.0000",
+    "open": "0.0400"
+   }
+  }
+ ],
+ "ticker": "RAINNYCM-24FEB-6"
+}

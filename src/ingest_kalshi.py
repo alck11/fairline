@@ -29,12 +29,22 @@ default — this module picks the recommended one:
         markets explicitly.)
     GET /markets/{ticker}/orderbook                          -> orderbook
     GET /series/{series_ticker}/markets/{ticker}/candlesticks -> candlesticks
-        (the `/historical/markets/{ticker}/candlesticks` variant 404s for
-        markets that haven't crossed Kalshi's historical-archive cutoff yet —
-        confirmed live — so this module always uses the series-scoped
-        endpoint, resolving `series_ticker` via GET /markets/{ticker} then
-        GET /events/{event_ticker} and caching the result.)
+        (resolving `series_ticker` via GET /markets/{ticker} then
+        GET /events/{event_ticker}, caching the result.)
     GET /markets?tickers=...                                 -> resolutions
+
+    -- historical tier (ADR-0023/ADR-0028), for data older than the live
+       tier's ~2-month settled-market window --
+    GET /historical/markets?series_ticker=...                -> historical_markets
+    GET /historical/markets/{ticker}/candlesticks            -> candlesticks(historical=True)
+
+The two tiers are strictly complementary, both directions confirmed live:
+the historical candlestick endpoint 404s for markets that have not yet
+crossed Kalshi's archive cutoff, and the series-scoped one 404s for markets
+that have. `GET /historical/cutoff` reports the boundary. They also spell
+their candlestick fields differently (`price.close_dollars` + `volume_fp`
+live, `price.close` + `volume` historical) — handled by `_candle_field`,
+whose docstring explains why that mismatch is dangerous rather than cosmetic.
 
 Token id scheme: Kalshi has no separate per-side token id (unlike Polymarket's
 CLOB token ids) — YES/NO are just sides of one `ticker`. This module
@@ -87,6 +97,34 @@ PERIOD_MINUTES = {"1m": 1, "1h": 60, "1d": 1440}
 # statuses GetMarkets/GetEvents treat as "resolved" — result is only
 # meaningful once a market has left the tradable lifecycle.
 RESOLVED_STATUSES = {"finalized", "settled", "determined"}
+
+# Kalshi's two candlestick endpoints return the SAME data under DIFFERENT field
+# names (both confirmed live 2026-08-01 by pulling one market from each tier):
+#
+#   live tier  /series/{s}/markets/{t}/candlesticks  price.close_dollars, volume_fp
+#   historical /historical/markets/{t}/candlesticks  price.close,         volume
+#
+# Same units (decimal-dollar strings like "0.0400"), same semantics — the
+# historical tier simply drops the `_dollars`/`_fp` suffixes.
+#
+# This is not a cosmetic difference, and it is the reason `_candle_field` below
+# exists instead of a plain `.get()`. Parsing a historical candle with the
+# live-tier names returns None for every price, which is exactly the encoding
+# Kalshi uses for "nothing traded in this bar" — so it falls through to the
+# yes_bid/yes_ask midpoint fallback, whose lookups miss for the same reason and
+# resolve to 0.0 via `or 0`. The result is a full candle series of zero prices,
+# stored with no exception raised anywhere (verified against a real historical
+# candle before this code was written). A study reading those candles would be
+# scoring the market at a price of zero and never know.
+_CANDLE_NAME_SUFFIXES = ("_dollars", "")
+_CANDLE_VOLUME_KEYS = ("volume_fp", "volume")
+# Every price-ish field name either endpoint puts inside a candlestick's
+# `price` / `yes_bid` / `yes_ask` sub-dicts. Used to identify WHICH naming
+# convention a sub-dict follows, which cannot be done field-by-field: a bar
+# with no trades omits the OHLC keys entirely and carries only
+# `previous_dollars` (confirmed live), so "this individual key is absent" is
+# a legitimate, common state and must not be read as an unknown shape.
+_CANDLE_PRICE_BASES = ("open", "high", "low", "close", "mean", "previous")
 
 
 def _require_aware(dt: datetime, name: str) -> None:
@@ -259,6 +297,55 @@ class KalshiSource:
         if s in (None, ""):
             return None
         return float(s)
+
+    @staticmethod
+    def _candle_naming(d: dict, ticker: str) -> str | None:
+        """Which of the two field-naming conventions this candlestick sub-dict
+        uses: `"_dollars"` (live tier), `""` (historical tier), or None when
+        the dict is empty/absent and there is nothing to read.
+
+        Detection is per-DICT, deliberately not per-field. A bar in which
+        nothing traded omits its OHLC keys entirely and carries only
+        `previous_dollars` (confirmed live) — so an individual missing key is
+        an ordinary, expected state, and treating it as an unknown shape would
+        reject perfectly good quiet bars. What is *not* ordinary is a
+        non-empty dict containing none of the known names at all; that means
+        Kalshi changed the shape, and it must fail loud rather than degrade
+        into the zero-price path this helper exists to prevent."""
+        if not d:
+            return None
+        for suffix in _CANDLE_NAME_SUFFIXES:
+            if any(f"{base}{suffix}" in d for base in _CANDLE_PRICE_BASES):
+                return suffix
+        raise ValueError(
+            f"candlestick price fields for {ticker!r} match no known naming "
+            f"convention (expected one of {_CANDLE_PRICE_BASES} optionally "
+            f"suffixed '_dollars'); keys present: {sorted(d)}. Kalshi's "
+            f"candlestick shape has changed — refusing to parse rather than "
+            f"storing a silently-zeroed price series")
+
+    @staticmethod
+    def _candle_field(d: dict, base: str, ticker: str,
+                      naming: str | None = None) -> float | None:
+        """One numeric candlestick field under whichever convention `d` uses.
+        None when the dict is empty, the field is absent (no trades in this
+        bar), or the value is null — all of which the caller handles by
+        falling back to a bid/ask midpoint."""
+        if naming is None:
+            naming = KalshiSource._candle_naming(d, ticker)
+        if naming is None:
+            return None
+        return KalshiSource._dollars(d.get(f"{base}{naming}"))
+
+    @staticmethod
+    def _candle_volume(c: dict) -> float | None:
+        """Bar volume across both endpoint spellings (`volume_fp` / `volume`).
+        Unlike the price fields this is non-load-bearing for pricing, so an
+        absent volume is None rather than an error."""
+        for key in _CANDLE_VOLUME_KEYS:
+            if key in c:
+                return KalshiSource._dollars(c[key])
+        return None
 
     @staticmethod
     def _ts(raw: str | None) -> datetime | None:
@@ -473,14 +560,33 @@ class KalshiSource:
                             bids=bids_sorted, asks=asks_sorted)
 
     def candlesticks(self, token_id: str, *, start: datetime, end: datetime,
-                     period: str = "1h") -> list[Candle]:
+                     period: str = "1h", historical: bool = False) -> list[Candle]:
+        """Candle series for one side of one market.
+
+        `historical=True` reads `/historical/markets/{ticker}/candlesticks`
+        instead of the series-scoped live-tier endpoint. This is required, not
+        optional, for markets Kalshi has moved past its archive cutoff: the
+        series-scoped endpoint returns **404** for them (confirmed live against
+        a 2024 KXRAINNYCM market), and conversely the historical endpoint 404s
+        for markets that have not yet crossed the cutoff (the pre-existing note
+        in this module's docstring). The two tiers also spell their fields
+        differently — see _CANDLE_NAME_SUFFIXES, which is the more dangerous
+        half of the difference.
+
+        The caller chooses the tier explicitly rather than this method probing
+        both: a probe would double the request count on the exact path
+        (multi-year backfills) where request count is the binding cost, and
+        would paper over a 404 that means something else."""
         if period not in PERIOD_MINUTES:
             raise ValueError(
                 f"period must be one of {sorted(PERIOD_MINUTES)}, got {period!r}")
         _require_aware(start, "start")
         _require_aware(end, "end")
         ticker, side = self._split_token(token_id)
-        series_ticker = self._series_ticker(ticker)
+        # The historical endpoint is addressed by ticker alone; only the
+        # live-tier path needs the series lookup (two extra round trips on a
+        # cache miss), so don't pay for it when it cannot be used.
+        series_ticker = None if historical else self._series_ticker(ticker)
         candles = []
         # series_ticker can be a cached value pulled straight from a prior
         # API response's `event["series_ticker"]` (see list_markets()/
@@ -506,18 +612,24 @@ class KalshiSource:
             # correctly (needs a paging loop keyed on the response's own bar
             # count/cursor semantics) and lower value for the MVP's current
             # backtest windows than the other review items; left as-is.
+            if historical:
+                path = (f"/historical/markets/"
+                        f"{urllib.parse.quote(ticker, safe='')}/candlesticks")
+            else:
+                path = (f"/series/{urllib.parse.quote(series_ticker, safe='')}"
+                        f"/markets/{urllib.parse.quote(ticker, safe='')}/candlesticks")
             data = self._get(
-                f"/series/{urllib.parse.quote(series_ticker, safe='')}"
-                f"/markets/{urllib.parse.quote(ticker, safe='')}/candlesticks",
+                path,
                 start_ts=int(start.timestamp()), end_ts=int(end.timestamp()),
                 period_interval=PERIOD_MINUTES[period],
             )
             for c in data.get("candlesticks") or []:
                 price = c.get("price") or {}
-                o, h, l, cl = (self._dollars(price.get("open_dollars")),
-                              self._dollars(price.get("high_dollars")),
-                              self._dollars(price.get("low_dollars")),
-                              self._dollars(price.get("close_dollars")))
+                naming = self._candle_naming(price, ticker)
+                o, h, l, cl = (self._candle_field(price, "open", ticker, naming),
+                              self._candle_field(price, "high", ticker, naming),
+                              self._candle_field(price, "low", ticker, naming),
+                              self._candle_field(price, "close", ticker, naming))
                 # `_dollars()` only checks "is this a parseable float" -- a
                 # malformed-but-valid response (e.g. open_dollars: "1.5" or
                 # "-0.1") parses fine, no null, no type error, and used to
@@ -546,13 +658,19 @@ class KalshiSource:
                     # price) -- more involved to fix correctly and lower value
                     # for the MVP than the other review items; left as-is.
                     yb, ya = c.get("yes_bid") or {}, c.get("yes_ask") or {}
+                    # Read through _candle_field for the same reason the price
+                    # block above does: with the raw live-tier key names this
+                    # fallback silently yields 0.0 on every historical bar.
+                    yb_naming = self._candle_naming(yb, ticker)
+                    ya_naming = self._candle_naming(ya, ticker)
                     mid = lambda k: (
-                        (self._dollars(yb.get(k)) or 0) + (self._dollars(ya.get(k)) or 0)
+                        (self._candle_field(yb, k, ticker, yb_naming) or 0)
+                        + (self._candle_field(ya, k, ticker, ya_naming) or 0)
                     ) / 2.0
-                    o = o if o is not None else mid("open_dollars")
-                    h = h if h is not None else mid("high_dollars")
-                    l = l if l is not None else mid("low_dollars")
-                    cl = cl if cl is not None else mid("close_dollars")
+                    o = o if o is not None else mid("open")
+                    h = h if h is not None else mid("high")
+                    l = l if l is not None else mid("low")
+                    cl = cl if cl is not None else mid("close")
                     # The range-check loop above only ever sees the (already-
                     # null) `price` fields on this path -- it runs before this
                     # fallback substitution, so a malformed yes_bid/yes_ask
@@ -572,7 +690,7 @@ class KalshiSource:
                                 f"midpoint fallback) out of range for "
                                 f"{ticker!r}: {val!r} (Kalshi dollar prices "
                                 f"must be within [0, 1])")
-                volume = self._dollars(c.get("volume_fp"))
+                volume = self._candle_volume(c)
                 ts = datetime.fromtimestamp(c["end_period_ts"], tz=timezone.utc)
                 if side == "yes":
                     candles.append(Candle(ts, token_id, o, h, l, cl, volume))
@@ -588,6 +706,92 @@ class KalshiSource:
                 f"Kalshi API returned an unexpected candlestick shape for "
                 f"{ticker!r}: {type(e).__name__}: {e}") from e
         return candles
+
+    # -- historical tier (ADR-0023 / ADR-0028) -----------------------------
+    def historical_markets(self, series_ticker: str, *, category: str,
+                           max_pages: int = 200
+                           ) -> tuple[list[MarketRow], list[ResolutionRow]]:
+        """Every settled market in one series from Kalshi's historical archive,
+        paginated to exhaustion, as (markets, resolutions).
+
+        Why this exists at all: `list_markets` reads the *live* tier, which
+        retains roughly the last two months of settled markets. ADR-0016/0018
+        mistook that window for the venue's entire history and killed several
+        research candidates on it; ADR-0023 retracted that after finding
+        `/historical/markets` reaches back to Kalshi's 2021 inception. That
+        retraction was applied only to throwaway analysis scripts — this method
+        is the same fix for the production ingest path, which is what actually
+        populates the store a calibration study reads.
+
+        Returns resolutions alongside markets because the historical listing
+        carries `result` inline on every row. The live-tier flow needs a
+        separate `resolutions()` batch call for this; here it would be pure
+        waste — hundreds of extra round trips re-fetching data already in hand.
+
+        `category` is supplied by the caller and not read from the response:
+        unlike the live tier's `/events` payload, historical market rows carry
+        no `category` (nor `series_ticker`) field — verified live. The caller
+        knows which series it asked for, so it knows the category; guessing one
+        from the ticker prefix would be a silent-mislabeling risk for no gain.
+        """
+        if category not in CATEGORY_MAP:
+            raise ValueError(
+                f"category must be one of {sorted(CATEGORY_MAP)} (ADR-0006 "
+                f"scope), got {category!r}")
+        markets: list[MarketRow] = []
+        resolutions: list[ResolutionRow] = []
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        pages = 0
+        while True:
+            pages += 1
+            if pages > max_pages:
+                raise KalshiAPIError(
+                    f"Kalshi API pagination exceeded {max_pages} page(s) "
+                    f"fetching GET /historical/markets "
+                    f"(series_ticker={series_ticker!r}): {len(markets)} market(s) "
+                    f"collected so far — aborting rather than looping "
+                    f"indefinitely")
+            page = self._get("/historical/markets", series_ticker=series_ticker,
+                             limit=1000, cursor=cursor)
+            try:
+                rows = page.get("markets") or []
+                for m in rows:
+                    # The archive holds only settled markets, but check rather
+                    # than assume: an unresolved row would otherwise become a
+                    # ResolutionRow asserting a settlement that never happened.
+                    if m.get("status") not in RESOLVED_STATUSES:
+                        continue
+                    result = m.get("result")
+                    if result not in ("yes", "no"):
+                        continue
+                    row = self._parse_market(m, category)
+                    markets.append(row)
+                    ticker = row.external_id
+                    yes_value = 1.0 if result == "yes" else 0.0
+                    resolved_at = self._ts(m.get("close_time"))
+                    resolutions.append(ResolutionRow(
+                        ticker, f"{ticker}-YES", yes_value, resolved_at))
+                    resolutions.append(ResolutionRow(
+                        ticker, f"{ticker}-NO", 1.0 - yes_value, resolved_at))
+                next_cursor = page.get("cursor")
+            except (KeyError, TypeError, AttributeError, ValueError) as e:
+                raise KalshiAPIError(
+                    f"Kalshi API returned an unexpected response shape from "
+                    f"GET /historical/markets (series_ticker={series_ticker!r}): "
+                    f"{type(e).__name__}: {e}") from e
+            if not next_cursor or not rows:
+                break
+            if next_cursor in seen_cursors:
+                # Same stuck-pagination guard list_markets carries: a repeated
+                # cursor on a non-empty page never terminates on its own.
+                raise KalshiAPIError(
+                    f"Kalshi API returned a repeated pagination cursor for "
+                    f"GET /historical/markets (series_ticker={series_ticker!r}) "
+                    f"after {pages} page(s) — refusing to loop")
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        return markets, resolutions
 
     def resolutions(self, external_ids: Sequence[str]) -> list[ResolutionRow]:
         if not external_ids:
