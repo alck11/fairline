@@ -79,7 +79,7 @@ catalogued. MRAIN-1's own pre-registered gate (Brier skill ≥5%, n≥400 across
 ≥3 station-months) looks newly reachable. **This is the strongest candidate
 for a fresh look, and the power objection that killed it is gone.**
 
-**HURSEAS-1 — reopens, but weakly.** 4 independent hurricane seasons
+**HURSEAS-1 — reopens, but weakly.** — **Re-checked 2026-07-31 by [ADR-0026](0026-hurseas1-still-dead-but-now-for-the-right-reason.md): confirmed dead. 4 seasons is the real ceiling (all 3 relevant tickers cover the identical Atlantic-basin annual count, not independent data), and annual cadence caps this regardless of API tier — unlike MRAIN-1, this one stays closed.** 4 independent hurricane seasons
 (2022–2025) instead of 0. ADR-0016's own standard for this candidate was that
 even "one season" (n=1) makes a powered gate impossible; 4 is a real
 improvement but is still a small-n regime for anything claiming statistical
