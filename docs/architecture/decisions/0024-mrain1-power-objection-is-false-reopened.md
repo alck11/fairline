@@ -86,3 +86,11 @@ IEM would provide (the 2026-07-25 doc flagged this as a mandatory 0.5-day
 check before trusting any result, per ADR-0012's own mis-parsed-strike
 caution). None of that exists yet. This ADR closes the "is there enough data"
 question; it opens, rather than answers, "does the model beat the price."
+
+**Scoped 2026-08-01 by [ADR-0028](0028-mrain1-calibration-study-scoped.md):**
+all three items above checked concretely. (3) is confirmed live (5/5 months'
+Kalshi settlement matches IEM's precip sum). (1) turns out to need no new API
+or schema — `precip` already exists in the endpoint WP-6 uses. (2) is real,
+novel work, scoped at 2-3 dev-days. One piece neither ADR named explicitly:
+the *production* ingest pipeline has the same historical-tier gap ADR-0023
+found and fixed only in read-only diagnostic scripts. Total: ~8-10 dev-days.
