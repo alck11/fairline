@@ -417,6 +417,164 @@ def test_graceful_degradation_on_429():
 
 
 # ---------------------------------------------------------------------------
+# precipitation (MRAIN-1 / ADR-0028) — the variable Kalshi's monthly rain
+# markets resolve against. Fixture daily_nyc_2025_12.json is a full real month
+# captured live 2026-08-01, deliberately NOT trimmed to a few rows: its monthly
+# SUM is the quantity ADR-0028 verified against Kalshi's own settlement, so the
+# whole month is the ground truth being frozen.
+# ---------------------------------------------------------------------------
+def precip_router(path, query):
+    if path == "/daily.json":
+        return _load("daily_nyc_2025_12.json")
+    raise AssertionError(f"unmocked IEM path in precip router: {path}")
+
+
+def test_observations_parse_precip():
+    calls, restore = install_fixture_router(precip_router)
+    try:
+        rows = WeatherSource().observations("KNYC", start=date(2025, 12, 1),
+                                            end=date(2025, 12, 1))
+    finally:
+        restore()
+    by_var = {r.variable: r for r in rows}
+    check("precip" in by_var, f"a precip row must be emitted: {sorted(by_var)}")
+    p = by_var["precip"]
+    check(p.value == 0.0, f"2025-12-01 precip should be 0.0: {p.value}")
+    check(p.station == "KNYC" and p.source == "iem-asos",
+          f"precip row station/source wrong: {p}")
+    # precip shares the observation PIT convention: observed_at = next local midnight
+    check(p.observed_at == datetime(2025, 12, 2, 5, 0, tzinfo=timezone.utc),
+          f"precip observed_at must be end-of-local-day UTC (EST, UTC-5): "
+          f"{p.observed_at}")
+
+
+def test_precip_monthly_sum_matches_kalshi_settlement():
+    """The load-bearing regression on ADR-0028's central finding: summing the
+    stored daily precip rows for Dec 2025 at KNYC must land inside (3, 4] —
+    the bracket Kalshi's own KXRAINNYCM-25DEC ladder settled to (>1,>2,>3 YES;
+    >4 NO). If a future change rounds traces, drops estimated days, or converts
+    units, this test fails and the study's ground truth is known to have moved."""
+    calls, restore = install_fixture_router(precip_router)
+    try:
+        rows = WeatherSource().observations("KNYC", start=date(2025, 12, 1),
+                                            end=date(2025, 12, 31))
+    finally:
+        restore()
+    precip_rows = [r for r in rows if r.variable == "precip"]
+    check(len(precip_rows) == 31, f"expected 31 daily precip rows: {len(precip_rows)}")
+    total = sum(r.value for r in precip_rows)
+    check(3.0 < total <= 4.0,
+          f"Dec 2025 KNYC precip total {total:.4f} must fall in Kalshi's settled "
+          f"bracket (3, 4] — see ADR-0028")
+    check(abs(total - 3.3802) < 1e-9,
+          f"exact captured total changed: {total!r} (expected 3.3802)")
+
+
+def test_precip_trace_values_preserved_not_rounded():
+    """IEM encodes a trace (measurable but <0.01in) as 0.0001. Storing it as-is
+    is what reproduces Kalshi's settlement; rounding to 0 would make the data
+    disagree with the venue. Two such days exist in the real Dec-2025 fixture."""
+    calls, restore = install_fixture_router(precip_router)
+    try:
+        rows = WeatherSource().observations("KNYC", start=date(2025, 12, 1),
+                                            end=date(2025, 12, 31))
+    finally:
+        restore()
+    traces = [r for r in rows if r.variable == "precip" and r.value == 0.0001]
+    check(len(traces) == 2,
+          f"the real fixture carries 2 trace days; got {len(traces)} — traces "
+          f"must not be rounded away")
+
+
+def test_observations_skip_null_precip():
+    def router(path, query):
+        return {"data": [
+            {"station": "NYC", "date": "2026-06-01", "max_tmpf": 71.0,
+             "min_tmpf": 53.0, "precip": None},
+        ]}
+    calls, restore = install_fixture_router(router)
+    try:
+        rows = WeatherSource().observations("KNYC", start=date(2026, 6, 1),
+                                            end=date(2026, 6, 1))
+    finally:
+        restore()
+    check({r.variable for r in rows} == {"tmax", "tmin"},
+          f"null precip must be skipped, temps kept: {[r.variable for r in rows]}")
+
+
+def test_precip_out_of_range_raises():
+    """Negative precip is physically impossible and would silently shrink a
+    monthly sum (pushing a market's true bracket down); an absurd positive is
+    the signature of a unit-confusion bug. Both must fail loud, not store."""
+    for bad in (-0.5, 1000.0):
+        def router(path, query, _bad=bad):
+            return {"data": [{"station": "NYC", "date": "2026-06-01", "precip": _bad}]}
+        calls, restore = install_fixture_router(router)
+        try:
+            WeatherSource().observations("KNYC", start=date(2026, 6, 1),
+                                         end=date(2026, 6, 1))
+            raise AssertionError(f"precip={bad} should raise WeatherAPIError")
+        except WeatherAPIError as e:
+            check("precip" in str(e), f"error should name the field: {e}")
+        finally:
+            restore()
+
+
+def test_precip_bounds_do_not_reuse_temperature_bounds():
+    """A guard against the tempting refactor of sharing one validator: -20 is a
+    perfectly ordinary tmpf and an impossible precip. If precip ever starts
+    using the temperature range, this passes silently in production and
+    corrupts every monthly sum — so pin it here."""
+    def router(path, query):
+        return {"data": [{"station": "NYC", "date": "2026-06-01", "precip": -20.0}]}
+    calls, restore = install_fixture_router(router)
+    try:
+        WeatherSource().observations("KNYC", start=date(2026, 6, 1),
+                                     end=date(2026, 6, 1))
+        raise AssertionError("precip=-20.0 must be rejected (it is a valid tmpf)")
+    except WeatherAPIError:
+        pass
+    finally:
+        restore()
+
+
+# ---------------------------------------------------------------------------
+# station registry + series mapping for MRAIN-1 (ADR-0028)
+# ---------------------------------------------------------------------------
+def test_rain_series_station_mapping():
+    """Every KXRAIN*M series in SERIES_STATION resolves to a registered station.
+    The specific city-airport choices are the part that silently corrupts a
+    study if wrong (a city can have two ASOS sites), so the CLI-code-derived
+    ones are pinned explicitly — all validated in ADR-0028 against 20 real
+    settled Kalshi months."""
+    rain = {s: st for s, st in SERIES_STATION.items() if s.startswith("KXRAIN")}
+    check(len(rain) == 10, f"expected 10 mapped rain series, got {len(rain)}: {sorted(rain)}")
+    for series, icao in rain.items():
+        check(icao in STATIONS, f"{series} maps to unregistered station {icao!r}")
+        check(resolve_station(series).icao == icao,
+              f"resolve_station({series!r}) should reach {icao!r}")
+    # the ambiguous-airport cases, pinned by CLI code cited in Kalshi's rules
+    check(rain["KXRAINCHIM"] == "KMDW", "Chicago rain resolves at Midway (CLIMDW), not O'Hare")
+    check(rain["KXRAINHOUM"] == "KHOU", "Houston rain resolves at Hobby (CLIHOU), not KIAH")
+    check(rain["KXRAINDALM"] == "KDFW", "Dallas rain resolves at DFW (CLIDFW), not Love Field")
+    # KXRAINSTPM has zero resolved history (ADR-0024) — mapping it would imply
+    # a study population that does not exist
+    check("KXRAINSTPM" not in SERIES_STATION,
+          "KXRAINSTPM has no resolved history and must not be mapped")
+
+
+def test_new_rain_stations_have_sane_timezones():
+    """A wrong tz shifts observed_at by hours, which moves a day across the
+    month boundary and changes which month's total a day lands in."""
+    expected = {"KSEA": "America/Los_Angeles", "KHOU": "America/Chicago",
+                "KSFO": "America/Los_Angeles", "KDFW": "America/Chicago"}
+    for icao, tz in expected.items():
+        check(icao in STATIONS, f"{icao} missing from STATIONS")
+        check(STATIONS[icao].tz == tz,
+              f"{icao} tz should be {tz}, got {STATIONS[icao].tz}")
+
+
+# ---------------------------------------------------------------------------
 # load_* orchestrators — fetch + upsert wiring, idempotent re-run
 # ---------------------------------------------------------------------------
 def test_load_forecasts_and_observations_upsert():
@@ -552,6 +710,36 @@ def test_run_backfills_daily_cycles_over_window():
     check(n_fc == 3, f"expected 3 forecast rows (one per cycle), got {n_fc}")
 
 
+def test_run_observations_only_skips_forecast_calls():
+    """--observations-only (ADR-0028) must make ZERO MOS calls. This is not
+    cosmetic: MRAIN-1's benchmark is climatological and reads no forecast, so a
+    multi-year ten-station backfill would otherwise issue thousands of API
+    calls whose results nothing consumes."""
+    paths = []
+
+    def router(path, query):
+        paths.append(path)
+        if path == "/daily.json":
+            return {"data": [{"station": "NYC", "date": "2026-06-01", "precip": 0.5}]}
+        raise AssertionError(f"unexpected call to {path} under --observations-only")
+
+    calls, restore = install_fixture_router(router)
+    orig_fc, orig_obs = store.upsert_forecasts, store.upsert_observations
+    store.upsert_forecasts = lambda conn, rows: None
+    store.upsert_observations = lambda conn, rows: None
+    try:
+        n_fc, n_obs = run_weather_ingest.run(
+            WeatherSource(), None, stations=["KNYC"], model="NBS",
+            start=date(2026, 6, 1), end=date(2026, 6, 3), cycle_hour=12,
+            observations_only=True)
+    finally:
+        restore()
+        store.upsert_forecasts, store.upsert_observations = orig_fc, orig_obs
+    check("/mos.json" not in paths, f"no MOS call may be made: {paths}")
+    check(n_fc == 0, f"forecast count must be 0, got {n_fc}")
+    check(n_obs == 1, f"observations must still be ingested, got {n_obs}")
+
+
 def test_cli_bad_date_window_returns_nonzero():
     orig_connect = store.connect
     store.connect = lambda: (_ for _ in ()).throw(AssertionError("should not connect"))
@@ -584,6 +772,15 @@ def main() -> int:
         test_observations_skip_null_extreme,
         test_observations_multi_month_queries_each_month,
         test_observations_bad_window_raises,
+        test_observations_parse_precip,
+        test_precip_monthly_sum_matches_kalshi_settlement,
+        test_precip_trace_values_preserved_not_rounded,
+        test_observations_skip_null_precip,
+        test_precip_out_of_range_raises,
+        test_precip_bounds_do_not_reuse_temperature_bounds,
+        test_rain_series_station_mapping,
+        test_new_rain_stations_have_sane_timezones,
+        test_run_observations_only_skips_forecast_calls,
         test_graceful_degradation_on_repeated_5xx,
         test_graceful_degradation_on_429,
         test_load_forecasts_and_observations_upsert,

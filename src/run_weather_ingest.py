@@ -5,6 +5,9 @@ observations for one or more stations into the store (WP-1's schema/upserts).
     python3 src/run_weather_ingest.py --station KNYC --days 30
     python3 src/run_weather_ingest.py --station KXHIGHNY --start 2026-06-01 --end 2026-06-30
     python3 src/run_weather_ingest.py --station KNYC --station KLAX --model NBS --days 14
+    # MRAIN-1 precipitation backfill (climatological benchmark reads no forecast):
+    python3 src/run_weather_ingest.py --station KXRAINNYCM --start 2024-01-01 \
+            --end 2026-05-31 --observations-only
 
 `--station` accepts a canonical ICAO (KNYC) or a Kalshi series prefix (KXHIGHNY,
 mapped via SERIES_STATION); repeat it for several stations. Point the window
@@ -51,24 +54,39 @@ def _forecast_cycles(start: date, end: date, cycle_hour: int) -> list[datetime]:
 
 
 def run(src: WeatherSource, conn, *, stations: list[str], model: str,
-        start: date, end: date, cycle_hour: int = 12) -> tuple[int, int]:
+        start: date, end: date, cycle_hour: int = 12,
+        observations_only: bool = False) -> tuple[int, int]:
     """Ingest forecasts + observations for every station over [start, end].
     Forecasts are backfilled one MOS cycle per day (at `cycle_hour` UTC) across the
     window, so a single run captures forecast *history*, not just the latest cycle.
     Returns (total_forecast_rows, total_observation_rows). Raises WeatherAPIError
     / whatever store.py raises on a genuine failure; does no printing beyond
-    per-station progress, so it stays easy to call from a test."""
-    runtimes = _forecast_cycles(start, end, cycle_hour)
+    per-station progress, so it stays easy to call from a test.
+
+    `observations_only` skips the forecast side entirely. This is not a
+    convenience flag: MRAIN-1's benchmark (ADR-0028) is *climatological* —
+    `P(accumulation_to_date + climatological_residual > strike)` — and uses no
+    MOS forecast at all. Backfilling one MOS cycle per day for a multi-year,
+    ten-station precipitation window would mean thousands of API calls whose
+    results nothing reads. The daily observation endpoint is queried per
+    (year, month) regardless, so the observation side of a multi-year backfill
+    stays cheap."""
+    runtimes = [] if observations_only else _forecast_cycles(start, end, cycle_hour)
     total_fc = total_obs = 0
     for station in stations:
-        n_fc = weather_ingest.load_forecasts(conn, src, station, model=model,
-                                             runtimes=runtimes or None)
+        n_fc = 0
+        if not observations_only:
+            n_fc = weather_ingest.load_forecasts(conn, src, station, model=model,
+                                                 runtimes=runtimes or None)
         n_obs = weather_ingest.load_observations(conn, src, station,
                                                  start=start, end=end)
         total_fc += n_fc
         total_obs += n_obs
-        print(f"  {station}: {n_fc} forecast row(s) over {len(runtimes)} cycle(s), "
-              f"{n_obs} observation row(s)")
+        if observations_only:
+            print(f"  {station}: {n_obs} observation row(s) (forecasts skipped)")
+        else:
+            print(f"  {station}: {n_fc} forecast row(s) over {len(runtimes)} cycle(s), "
+                  f"{n_obs} observation row(s)")
     return total_fc, total_obs
 
 
@@ -98,6 +116,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cycle-hour", type=int, default=12,
                         help="UTC hour of the daily MOS forecast cycle to backfill "
                              "across the window (default 12 = 12Z)")
+    parser.add_argument("--observations-only", action="store_true",
+                        help="skip MOS forecast backfill, ingest daily observations "
+                             "only. Use for precipitation/MRAIN-1 backfills, whose "
+                             "benchmark is climatological and reads no forecast "
+                             "(ADR-0028) -- avoids thousands of unread MOS calls "
+                             "over a multi-year window.")
     args = parser.parse_args(argv)
 
     stations = args.stations or ["KNYC"]
@@ -118,7 +142,8 @@ def main(argv: list[str] | None = None) -> int:
     src = WeatherSource()
     try:
         n_fc, n_obs = run(src, conn, stations=stations, model=args.model,
-                          start=start, end=end, cycle_hour=args.cycle_hour)
+                          start=start, end=end, cycle_hour=args.cycle_hour,
+                          observations_only=args.observations_only)
     except WeatherAPIError as e:
         print(f"IEM API failure: {e}", file=sys.stderr)
         return 1

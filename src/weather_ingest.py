@@ -25,7 +25,10 @@ https://mesonet.agron.iastate.edu/api/1):
     GET /daily.json?network=<NET>&station=<ID>&year=&month=  -> observations()
         Rows carry `date` (local calendar day), `max_tmpf`, `min_tmpf` — the
         daily extremes Kalshi high/low-temp markets resolve against, the realized
-        truth for weather_observation.
+        truth for weather_observation — and `precip` (daily liquid-equivalent
+        accumulation, inches), the truth Kalshi's *monthly rain* markets resolve
+        against (MRAIN-1 / ADR-0028). Precipitation needs no new endpoint: it is
+        one more field on the call this module already makes for temperature.
 
 Station addressing (ADR-0011). MOS keys stations by ICAO (`KNYC`); the daily/ASOS
 feed keys them by an IEM network + short id (`NY_ASOS` / `NYC`). Both feeds are
@@ -68,15 +71,31 @@ DEFAULT_MOS_MODEL = "NBS"
 FORECAST_VARIABLE = "tmpf"
 
 # Observation variables: the unambiguous daily extremes the daily endpoint gives
-# directly (Kalshi high/low-temp markets resolve against these).
+# directly (Kalshi high/low-temp markets resolve against these), plus daily
+# precipitation accumulation (what Kalshi's monthly rain markets resolve against;
+# ADR-0028 confirmed IEM's `precip` matches Kalshi's settlement on 20/20 checked
+# station-months across all 10 mapped cities).
 OBS_TMAX = "tmax"
 OBS_TMIN = "tmin"
+OBS_PRECIP = "precip"
 
 # A sane physical bound for US surface air temperature in degrees F; anything
 # outside is treated as a malformed response and fails loud (matching
 # KalshiSource's fail-on-malformed-field ethos) rather than silently storing
 # garbage the calibration study would then trust.
 _TEMP_F_MIN, _TEMP_F_MAX = -80.0, 140.0
+
+# Physical bounds for DAILY precipitation accumulation, inches. Zero is the
+# overwhelmingly common value and is legitimate — the lower bound rejects
+# negatives (physically impossible, and a silent negative would corrupt a
+# monthly sum in the direction that makes a strike look un-hit). The upper bound
+# is set well above the US 24h record (~43in, Alvin TX 1979) so a real extreme
+# is never rejected, while a unit-confusion bug (mm reported as inches) or a
+# sentinel value still fails loud. Deliberately NOT reusing the temperature
+# check: -20 is a plausible tmpf and an impossible precip, so one shared
+# validator would silently accept the wrong thing for whichever variable it
+# wasn't written for.
+_PRECIP_IN_MIN, _PRECIP_IN_MAX = 0.0, 60.0
 
 
 @dataclass(frozen=True)
@@ -106,13 +125,44 @@ STATIONS: dict[str, WeatherStation] = {
     "KDEN": WeatherStation("KDEN", "CO_ASOS", "DEN", "America/Denver"),
     "KAUS": WeatherStation("KAUS", "TX_ASOS", "AUS", "America/Chicago"),
     "KPHL": WeatherStation("KPHL", "PA_ASOS", "PHL", "America/New_York"),
+    # Added for MRAIN-1 (ADR-0028). Each was spot-checked live against IEM
+    # (2026-08-01) — network/id resolve and the returned station `name` matches
+    # the NWS CLI site Kalshi's rules cite, which is the part that actually
+    # matters: CLIHOU is Houston *Hobby*, not Intercontinental (KIAH), and
+    # CLIDFW is DFW, not Dallas Love. Picking the wrong one of a city's two
+    # airports would silently corrupt every study using it.
+    "KSEA": WeatherStation("KSEA", "WA_ASOS", "SEA", "America/Los_Angeles"),
+    "KHOU": WeatherStation("KHOU", "TX_ASOS", "HOU", "America/Chicago"),
+    "KSFO": WeatherStation("KSFO", "CA_ASOS", "SFO", "America/Los_Angeles"),
+    "KDFW": WeatherStation("KDFW", "TX_ASOS", "DFW", "America/Chicago"),
 }
 
 # Kalshi weather series ticker prefix -> canonical station (curated per ADR-0011;
 # each entry is a claim about which station that Kalshi series resolves against and
 # should be confirmed against the series' Kalshi rules before relying on it).
+#
+# The KXRAIN*M (monthly precipitation) entries are not just rules-text reads:
+# each was validated end-to-end against real settled outcomes (ADR-0028) — for
+# two resolved months per series, the strike ladder's YES/NO boundary was
+# compared to IEM's own summed daily `precip` for the mapped station, and the
+# implied bracket contained the IEM total in **20 of 20** cases. That is the
+# check ADR-0012 demands before a study trusts a mapping.
+#
+# KXRAINSTPM (St. Paul) is deliberately absent: it has zero resolved history
+# (ADR-0024), so there is nothing to map it against and no study can use it.
 SERIES_STATION: dict[str, str] = {
     "KXHIGHNY": "KNYC",
+    # monthly rain (MRAIN-1) — station per the NWS CLI code in each series' rules
+    "KXRAINNYCM": "KNYC",   # "Central Park, New York City"
+    "KXRAINLAXM": "KLAX",   # CLILAX
+    "KXRAINCHIM": "KMDW",   # CLIMDW — Chicago *Midway*, not O'Hare
+    "KXRAINMIAM": "KMIA",   # CLIMIA
+    "KXRAINDENM": "KDEN",   # CLIDEN
+    "KXRAINAUSM": "KAUS",   # CLIAUS
+    "KXRAINSEAM": "KSEA",   # CLISEA
+    "KXRAINHOUM": "KHOU",   # CLIHOU — Houston *Hobby*
+    "KXRAINSFOM": "KSFO",   # CLISFO
+    "KXRAINDALM": "KDFW",   # CLIDFW
 }
 
 
@@ -232,6 +282,18 @@ class WeatherSource:
                 f"(expected {_TEMP_F_MIN}..{_TEMP_F_MAX} degrees F)")
         return value
 
+    @staticmethod
+    def _check_precip(value: float, field: str, station: str) -> float:
+        """Validate a daily precipitation accumulation in inches. Separate from
+        _check_temp on purpose (see _PRECIP_IN_MIN/_MAX): the two variables have
+        disjoint plausible ranges, so a shared validator would wave through
+        exactly the values each was meant to catch."""
+        if not (_PRECIP_IN_MIN <= value <= _PRECIP_IN_MAX):
+            raise ValueError(
+                f"{field} out of physical range for {station!r}: {value!r} "
+                f"(expected {_PRECIP_IN_MIN}..{_PRECIP_IN_MAX} inches)")
+        return value
+
     # -- forecasts (MOS) --------------------------------------------------
     def forecasts(self, station: WeatherStation | str, *,
                   model: str = DEFAULT_MOS_MODEL,
@@ -291,11 +353,21 @@ class WeatherSource:
     # -- observations (ASOS daily) ---------------------------------------
     def observations(self, station: WeatherStation | str, *,
                      start: date, end: date) -> list[WeatherObservationRow]:
-        """Daily max/min temperature for one station over [start, end] (inclusive,
-        by local calendar date) as observation rows. The daily endpoint is queried
-        per (year, month) covering the window; rows outside [start, end] are
-        dropped. Emits a tmax and/or tmin row per day, whichever the response
-        carries (a null extreme is skipped, not stored)."""
+        """Daily max/min temperature and precipitation accumulation for one
+        station over [start, end] (inclusive, by local calendar date) as
+        observation rows. The daily endpoint is queried per (year, month)
+        covering the window; rows outside [start, end] are dropped. Emits a
+        tmax, tmin and/or precip row per day, whichever the response carries (a
+        null value is skipped, not stored).
+
+        A note on precipitation specifically. IEM reports a *trace* (measurable
+        but < 0.01in) as 0.0001, and carries a `precip_est` boolean marking
+        values it estimated rather than measured. Both are stored as-is,
+        unfiltered and unrounded: the point of this row is to reproduce what
+        Kalshi settles on, and ADR-0028 verified that summing these values
+        as-given reproduces Kalshi's own monthly settlement in 20/20 checked
+        station-months. Rounding traces to zero or dropping estimated days
+        would make this data *disagree* with the venue it is meant to model."""
         if end < start:
             raise ValueError(f"end {end} is before start {start}")
         st = resolve_station(station)
@@ -309,12 +381,14 @@ class WeatherSource:
                     if d < start or d > end:
                         continue
                     observed_at = _observed_at(d, st.tz)
-                    for variable, key in ((OBS_TMAX, "max_tmpf"),
-                                          (OBS_TMIN, "min_tmpf")):
+                    for variable, key, check in (
+                            (OBS_TMAX, "max_tmpf", self._check_temp),
+                            (OBS_TMIN, "min_tmpf", self._check_temp),
+                            (OBS_PRECIP, "precip", self._check_precip)):
                         raw = r.get(key)
                         if raw is None:
                             continue
-                        value = self._check_temp(float(raw), key, st.icao)
+                        value = check(float(raw), key, st.icao)
                         rows.append(WeatherObservationRow(
                             observed_at=observed_at, station=st.icao,
                             variable=variable, value=value, source="iem-asos"))

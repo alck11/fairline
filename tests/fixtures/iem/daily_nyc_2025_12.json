@@ -1,0 +1,283 @@
+{
+ "data": [
+  {
+   "station": "NYC",
+   "date": "2025-12-01",
+   "max_tmpf": 43.0,
+   "min_tmpf": 34.0,
+   "precip": 0.0,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-02",
+   "max_tmpf": 40.0,
+   "min_tmpf": 34.0,
+   "precip": 0.78,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-03",
+   "max_tmpf": 41.0,
+   "min_tmpf": 31.0,
+   "precip": 0.0,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-04",
+   "max_tmpf": 41.0,
+   "min_tmpf": 24.0,
+   "precip": 0.0,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-05",
+   "max_tmpf": 32.0,
+   "min_tmpf": 20.0,
+   "precip": 0.0,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-06",
+   "max_tmpf": 42.0,
+   "min_tmpf": 30.0,
+   "precip": 0.02,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-07",
+   "max_tmpf": 43.0,
+   "min_tmpf": 34.0,
+   "precip": 0.0,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-08",
+   "max_tmpf": 38.0,
+   "min_tmpf": 22.0,
+   "precip": 0.0,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-09",
+   "max_tmpf": 35.0,
+   "min_tmpf": 19.0,
+   "precip": 0.0,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-10",
+   "max_tmpf": 47.0,
+   "min_tmpf": 32.0,
+   "precip": 0.07,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-11",
+   "max_tmpf": 41.0,
+   "min_tmpf": 28.0,
+   "precip": 0.0,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-12",
+   "max_tmpf": 35.0,
+   "min_tmpf": 25.0,
+   "precip": 0.0,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-13",
+   "max_tmpf": 41.0,
+   "min_tmpf": 27.0,
+   "precip": 0.03,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-14",
+   "max_tmpf": 33.0,
+   "min_tmpf": 19.0,
+   "precip": 0.51,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-15",
+   "max_tmpf": 29.0,
+   "min_tmpf": 19.0,
+   "precip": 0.0,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-16",
+   "max_tmpf": 32.0,
+   "min_tmpf": 24.0,
+   "precip": 0.0,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-17",
+   "max_tmpf": 47.0,
+   "min_tmpf": 30.0,
+   "precip": 0.0,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-18",
+   "max_tmpf": 50.0,
+   "min_tmpf": 36.0,
+   "precip": 0.02,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-19",
+   "max_tmpf": 58.0,
+   "min_tmpf": 32.0,
+   "precip": 1.16,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-20",
+   "max_tmpf": 38.0,
+   "min_tmpf": 30.0,
+   "precip": 0.0,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-21",
+   "max_tmpf": 46.0,
+   "min_tmpf": 29.0,
+   "precip": 0.0,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-22",
+   "max_tmpf": 39.0,
+   "min_tmpf": 28.0,
+   "precip": 0.0,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-23",
+   "max_tmpf": 40.0,
+   "min_tmpf": 35.0,
+   "precip": 0.22,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-24",
+   "max_tmpf": 46.0,
+   "min_tmpf": 35.0,
+   "precip": 0.0,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-25",
+   "max_tmpf": 49.0,
+   "min_tmpf": 29.0,
+   "precip": 0.0,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-26",
+   "max_tmpf": 29.0,
+   "min_tmpf": 20.0,
+   "precip": 0.27,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-27",
+   "max_tmpf": 31.0,
+   "min_tmpf": 25.0,
+   "precip": 0.22,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-28",
+   "max_tmpf": 39.0,
+   "min_tmpf": 22.0,
+   "precip": 0.0001,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-29",
+   "max_tmpf": 49.0,
+   "min_tmpf": 31.0,
+   "precip": 0.08,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-30",
+   "max_tmpf": 33.0,
+   "min_tmpf": 27.0,
+   "precip": 0.0,
+   "precip_est": false,
+   "tmpf_est": false
+  },
+  {
+   "station": "NYC",
+   "date": "2025-12-31",
+   "max_tmpf": 33.0,
+   "min_tmpf": 27.0,
+   "precip": 0.0001,
+   "precip_est": false,
+   "tmpf_est": false
+  }
+ ]
+}
