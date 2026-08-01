@@ -93,7 +93,12 @@ re-checked the same way before assuming ADR-0016's verdict still holds.
 
 **FLB-1's "emotional" target basket** — ADR-0017 reported 4 resolved markets
 across 3 series from the live-tier probe. Almost certainly undercounted the
-same way; not re-tested here, but should be before trusting that number.
+same way; not re-tested here, but should be before trusting that number. —
+**Re-tested 2026-07-31 by [ADR-0027](0027-flb1-emotional-basket-more-data-still-underpowered.md):
+undercount confirmed (170 vs. 4 markets), but the family count that actually
+matters only grew to 7 (from 3) — still not a study, and structurally
+unlikely to become one on any predictable timeline (one-off political
+events, not a repeatable cadence).
 
 **FLB-1's weather-ladder decile study (ADR-0019/0020/0021) is the other major
 one.** It ran on 68 days / 2,411 markets from the live tier. `KXHIGHNY` alone
