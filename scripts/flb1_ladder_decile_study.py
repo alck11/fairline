@@ -65,6 +65,21 @@ paper's own convention.
     python3 scripts/flb1_ladder_decile_study.py
     python3 scripts/flb1_ladder_decile_study.py --auth   # KalshiCredentials.from_env()
     python3 scripts/flb1_ladder_decile_study.py --json out.json
+
+ADR-0023 update: this study originally pulled `/markets` (live tier), which
+ADR-0016 mistakenly believed was Kalshi's full retrievable history. It is
+not -- `/historical/markets` reaches back to Kalshi's 2021 inception (see
+ADR-0023). `--historical` repoints `fetch_population` at that endpoint
+instead, pulling every season the venue has, not the last ~68 days. Requires
+`--auth` (the historical tier was only verified reachable authenticated).
+The two endpoints share the same market JSON shape (checked live before
+writing this: `last_price_dollars`, `volume_fp`, `result`, `event_ticker`
+all present and identically named), so `fetch_population` is reused
+unchanged -- only the path and the dropped `status="settled"` filter differ
+(the historical tier only ever returns `status="finalized"` markets, checked
+live: a 500-market sample of KXHIGHNY was 100% finalized/yes-or-no).
+
+    python3 scripts/flb1_ladder_decile_study.py --auth --historical
 """
 from __future__ import annotations
 import argparse
@@ -105,15 +120,26 @@ class Obs:
     win: bool         # did THIS side win
 
 
-def fetch_population(src: KalshiSource, series_list: list[str], population: str) -> list[Obs]:
+def fetch_population(src: KalshiSource, series_list: list[str], population: str,
+                      *, historical: bool = False) -> list[Obs]:
+    # `/historical/markets` has no `status` filter (ADR-0023: it only ever
+    # returns finalized markets -- checked live) and spans years rather than
+    # ~68 days, so MAX_PAGES is raised well past what the live-tier path
+    # needs (KXHIGHNY alone is ~8,896 markets / 1000-per-page = 9 pages;
+    # 200 gives headroom for series this project hasn't sized yet without
+    # looping unboundedly on a genuine pagination bug).
+    path = "/historical/markets" if historical else "/markets"
+    max_pages = 200 if historical else 40
     obs: list[Obs] = []
     for series in series_list:
         cursor, pages, seen = None, 0, set()
         n_series = 0
-        while pages < 40:
+        while pages < max_pages:
             pages += 1
-            page = src._get("/markets", series_ticker=series, status="settled",
-                            limit=1000, cursor=cursor)
+            kwargs = {"series_ticker": series, "limit": 1000, "cursor": cursor}
+            if not historical:
+                kwargs["status"] = "settled"
+            page = src._get(path, **kwargs)
             markets = page.get("markets") or []
             for m in markets:
                 if m.get("result") not in ("yes", "no"):
@@ -199,16 +225,25 @@ def gate_test(obs: list[Obs], lo: float, hi: float, label: str) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--auth", action="store_true")
+    ap.add_argument("--historical", action="store_true",
+                     help="pull /historical/markets (full venue history, ADR-0023) "
+                          "instead of /markets (~68-day live-tier window). Requires --auth.")
     ap.add_argument("--json", help="write the raw result to this path")
     args = ap.parse_args()
+
+    if args.historical and not args.auth:
+        print("--historical requires --auth (verified reachable authenticated only)")
+        return 1
 
     credentials = KalshiCredentials.from_env() if args.auth else None
     src = KalshiSource(credentials=credentials)
 
+    tier = "/historical/markets (full history)" if args.historical else "/markets (~68-day live tier)"
+    print(f"Population source: {tier}")
     print("Fetching WEATHER ladder population...")
-    weather_obs = fetch_population(src, WEATHER_SERIES, "weather")
+    weather_obs = fetch_population(src, WEATHER_SERIES, "weather", historical=args.historical)
     print("\nFetching ECON ladder population...")
-    econ_obs = fetch_population(src, ECON_SERIES, "econ")
+    econ_obs = fetch_population(src, ECON_SERIES, "econ", historical=args.historical)
     all_obs = weather_obs + econ_obs
 
     report: dict = {"populations": {}, "gates": []}

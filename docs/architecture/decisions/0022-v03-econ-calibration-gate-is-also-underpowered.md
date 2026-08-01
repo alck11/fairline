@@ -1,6 +1,6 @@
 # ADR-0022 — roadmap.md's v0.3 econ line would hit the same wall as MRAIN-1/HURSEAS-1: 14 release-events total, not enough to gate
 
-- **Status:** **Likely retracted 2026-07-28 by [ADR-0023](0023-historical-tier-retracts-the-68-day-ceiling.md)** — the 14-event count was from live-tier data only (the same ADR-0016/0019 population), and `/historical/markets` was confirmed to reach years further back for weather series. Econ series were not re-tested against `/historical/markets` in this session — do this before trusting the verdict below.
+- **Status:** **Retracted 2026-07-31 by [ADR-0025](0025-flb1-gate-retested-on-full-history-stable-no-go.md)** — econ series were re-tested against `/historical/markets`: 145 gate-band families (10x this ADR's 14-event total), net ROI +0.20%, t=0.23. The verdict changes from "underpowered, can't tell" to **"powered, and there is no edge"** — a decisive NO-GO, not an open question. Do not use this ADR's "can't tell yet" framing; use ADR-0025's.
 - **Date:** 2026-07-28
 - **Warns against:** `docs/product/roadmap.md` v0.3 "Econ `prob_fn`" (6–12
   dev-days, "gated on its own calibration study") before it is started, using
