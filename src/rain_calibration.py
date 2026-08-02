@@ -37,6 +37,7 @@ Demo: `python3 src/rain_calibration.py` runs the study over a synthetic
 in-memory reader — no network, no Postgres.
 """
 from __future__ import annotations
+import bisect
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -159,10 +160,78 @@ class RainMarket:
     resolved_y: float
 
 
+class _StationHistory:
+    """One station's precipitation history, fetched **once** and sliced by
+    `as_of` in process.
+
+    Why not just call the PIT reader per instant, as calibration.py does? The
+    per-instant call re-reads the station's entire history from the database
+    every time. WP-7's temperature study could afford that over a 68-day
+    window; this one spans 17 years of daily rows across ~2,100 decision
+    instants, which is ~13 million rows over the wire — the study ran for ten
+    minutes using 36 seconds of CPU, i.e. almost entirely waiting on the
+    network, and is the same data-transfer wall ADR-0012 hit.
+
+    **This does not loosen the point-in-time boundary.** `daily_before`
+    applies exactly the predicate the reader's SQL applies — `observed_at <
+    as_of`, strict — via a bisect on the sorted timestamps. The rows are
+    fetched once with a horizon at or past the study end and then *filtered
+    down* per instant; no caller can see a row whose `observed_at` is at or
+    after its `as_of`. The one real obligation this shifts onto us is that
+    the predicate lives here rather than in store.py, so it is pinned by its
+    own test (`test_station_history_slice_matches_reader`)."""
+
+    __slots__ = ("_times", "_entries")
+
+    def __init__(self, reader: Reader, station: str, tz: ZoneInfo,
+                 horizon: datetime):
+        rows = reader.observations_before(station, OBS_VARIABLE, horizon)
+        entries = sorted(
+            ((o.observed_at,
+              climatology._obs_local_date(o.observed_at, tz),
+              float(o.value))
+             for o in rows),
+            key=lambda t: t[0])
+        self._times = [t[0] for t in entries]
+        self._entries = entries
+
+    def daily_before(self, as_of: datetime) -> dict[date, float]:
+        """{local date: inches} for every observation strictly before `as_of`."""
+        # bisect_left gives the first index whose timestamp is >= as_of, so the
+        # prefix before it is exactly the rows with observed_at < as_of.
+        i = bisect.bisect_left(self._times, as_of)
+        return {d: v for _, d, v in self._entries[:i]}
+
+
+class _DailyMemo:
+    """Per-run cache of the two *derived* quantities a rain probability needs:
+    how much has accumulated in the target month so far, and the prior-year
+    residual totals to compare against.
+
+    Keyed on (station, as_of, year, month) — the complete input set for both,
+    with the market's own threshold deliberately excluded, because every
+    strike in a month's ladder shares this work and differs only in the final
+    comparison. So a 13-strike December ladder computes it once, not 13 times.
+
+    Caching the derived numbers rather than the intermediate {date: inches}
+    dict is the point. A first version cached the dict and grew past 1.2GB
+    before finishing: ~2,100 distinct (station, as_of) keys each holding a
+    ~6,000-entry dict. These two values are a float and a list of ~16 floats,
+    so the same coverage costs kilobytes. Same lesson as ADR-0012 (whole-
+    history rescans are structural here), one level further in: memoize what
+    the caller actually consumes, not what happened to be expensive to
+    build."""
+    __slots__ = ("state",)
+
+    def __init__(self) -> None:
+        self.state: dict[tuple, tuple[float, list[float]] | None] = {}
+
+
 def rain_probability(reader: Reader, spec: RainMarketSpec, as_of: datetime,
                      tz: ZoneInfo, *,
-                     min_years: int = climatology.DEFAULT_MIN_YEARS
-                     ) -> float | None:
+                     min_years: int = climatology.DEFAULT_MIN_YEARS,
+                     memo: "_DailyMemo | None" = None,
+                     history: "_StationHistory | None" = None) -> float | None:
     """P(YES) for one market at one decision instant, or None when the
     benchmark cannot honestly answer (too little station history, or no
     remaining-days window left).
@@ -171,39 +240,101 @@ def rain_probability(reader: Reader, spec: RainMarketSpec, as_of: datetime,
     accumulation and the climatology are both restricted to what was
     knowable at `as_of` — and `residual_samples` additionally drops the
     market's own year from its climatology."""
-    observations = reader.observations_before(spec.station, OBS_VARIABLE, as_of)
-    if not observations:
+    state = _month_state(reader, spec.station, spec.year, spec.month, as_of, tz,
+                         memo=memo, history=history)
+    if state is None:
         return None
-    daily = climatology.collect_daily_precip(observations, tz)
+    accumulated, residual_totals = state
+    if len(residual_totals) < min_years:
+        return None
+    return climatology.prob_exceeds(residual_totals,
+                                    spec.threshold_in - accumulated)
 
-    # How far into the target month is knowable at `as_of`?
-    #
-    # Derived from the data rather than recomputed from the clock: the reader
-    # has already applied the `< as_of` cut, so the target-month days present
-    # in `daily` are exactly the days knowable at `as_of`, by construction.
-    # Re-deriving this from timezone arithmetic (which local midnight has
-    # passed, across DST, across month ends) would be a second implementation
-    # of the same boundary that could silently disagree with the first — and
-    # disagreeing in the permissive direction would be lookahead.
-    present = [d.day for d in daily
-               if d.year == spec.year and d.month == spec.month]
-    as_of_day = max(present) if present else 0
 
-    accumulated, _ = climatology.accumulation_to_date(
-        daily, year=spec.year, month=spec.month, through_day=as_of_day)
-    return climatology.residual_probability(
-        daily, target_year=spec.year, month=spec.month, as_of_day=as_of_day,
-        threshold_remaining=spec.threshold_in - accumulated,
-        min_years=min_years)
+def _month_state(reader: Reader, station: str, year: int, month: int,
+                 as_of: datetime, tz: ZoneInfo, *,
+                 memo: "_DailyMemo | None" = None,
+                 history: "_StationHistory | None" = None
+                 ) -> tuple[float, list[float]] | None:
+    """(accumulated inches so far, prior-year residual totals) for one
+    station-month at one instant, or None if there is no usable history or no
+    remaining-days window. Everything every strike in that month's ladder
+    shares — hence the memo key excluding the threshold.
+
+    `history`, when supplied, serves the same `observed_at < as_of` slice from
+    a single up-front fetch instead of one database round trip per instant;
+    without it this falls back to the reader directly, which is what the
+    unit tests exercise."""
+    key = (station, as_of, year, month)
+    if memo is not None and key in memo.state:
+        return memo.state[key]
+
+    if history is not None:
+        daily = history.daily_before(as_of)
+    else:
+        observations = reader.observations_before(station, OBS_VARIABLE, as_of)
+        daily = climatology.collect_daily_precip(observations, tz)
+    out: tuple[float, list[float]] | None
+    if not daily:
+        out = None
+    else:
+        # How far into the target month is knowable at `as_of`?
+        #
+        # Derived from the data rather than recomputed from the clock: the
+        # reader has already applied the `< as_of` cut, so the target-month
+        # days present in `daily` are exactly the days knowable at `as_of`, by
+        # construction. Re-deriving this from timezone arithmetic (which local
+        # midnight has passed, across DST, across month ends) would be a second
+        # implementation of the same boundary that could silently disagree with
+        # the first — and disagreeing permissively would be lookahead.
+        present = [d.day for d in daily if d.year == year and d.month == month]
+        as_of_day = max(present) if present else 0
+        accumulated, _ = climatology.accumulation_to_date(
+            daily, year=year, month=month, through_day=as_of_day)
+        samples = climatology.residual_samples(
+            daily, target_year=year, month=month, from_day=as_of_day + 1)
+        out = (accumulated, [s.total for s in samples])
+
+    if memo is not None:
+        memo.state[key] = out
+    return out
 
 
 def evaluate(reader: Reader, markets: list[RainMarket], *, start: datetime,
              end: datetime, step: timedelta, category: str = "rain",
              margin: float = DEFAULT_MARGIN,
-             min_years: int = climatology.DEFAULT_MIN_YEARS) -> CalibrationReport:
+             min_years: int = climatology.DEFAULT_MIN_YEARS,
+             lookback: timedelta = timedelta(days=75)) -> CalibrationReport:
     """Score price vs the climatological benchmark over a real or synthetic
     reader. Reader-based, mirroring calibration.evaluate, so the whole study
-    is testable with no database."""
+    is testable with no database.
+
+    `lookback` caps how far before its own resolution each market is sampled.
+    Without it every market is walked from the global `start`, so a market
+    resolving in 2026 is probed across two years of instants at which it did
+    not yet exist — thousands of candle queries per market that can only
+    return nothing. 75 days comfortably covers these markets' real lifetime
+    (listed roughly two months before their month ends) while removing the
+    dead prefix. It cannot bias the result: the instants it drops are ones
+    with no price to score against."""
+    # Deliberately NOT wrapped in calibration._MemoReader. That wrapper caches
+    # whole raw row-lists per (station, variable, as_of), which is the right
+    # trade for WP-7's 68-day temperature window but not here: 17 years of
+    # daily history times ~2,100 distinct instants is millions of retained row
+    # objects, and it drove this study past 1.4GB without finishing. `memo`
+    # below already collapses the same repeated reads one level further in, on
+    # the derived numbers, so the wrapper would add memory and no saved I/O.
+    memo = _DailyMemo()
+    # One history fetch per station for the whole study (see _StationHistory
+    # for why, and for why this does not weaken the PIT boundary). The horizon
+    # is the study end, so no row past the window is ever loaded at all.
+    histories: dict[str, _StationHistory] = {}
+    for mkt in markets:
+        st = mkt.spec.station
+        if st not in histories:
+            histories[st] = _StationHistory(
+                reader, st, ZoneInfo(weather_ingest.STATIONS[st].tz), end)
+
     samples: list[Sample] = []
     studied = 0
     for mkt in markets:
@@ -211,13 +342,15 @@ def evaluate(reader: Reader, markets: list[RainMarket], *, start: datetime,
         tz = ZoneInfo(weather_ingest.STATIONS[spec.station].tz)
         market_type = f"{category}:precip:greater"
         used = False
-        for as_of in _as_of_grid(start, end, step, mkt.resolves_at):
+        market_start = max(start, mkt.resolves_at - lookback)
+        for as_of in _as_of_grid(market_start, end, step, mkt.resolves_at):
             candles = reader.candles_before(mkt.yes_token_id, as_of)
             if not candles:
                 continue
             price = max(candles, key=lambda c: c.ts).close
             p_forecast = rain_probability(reader, spec, as_of, tz,
-                                          min_years=min_years)
+                                          min_years=min_years, memo=memo,
+                                          history=histories[spec.station])
             if p_forecast is None:
                 continue
             samples.append(Sample(

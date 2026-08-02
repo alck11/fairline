@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import climatology  # noqa: E402
 import rain_calibration  # noqa: E402
 import weather_ingest  # noqa: E402
 from rain_calibration import (  # noqa: E402
@@ -190,6 +191,64 @@ def test_probability_never_zero_or_one():
           f"probability must stay strictly inside (0,1): {p}")
 
 
+def test_station_history_slice_matches_reader():
+    """`_StationHistory` moves the `observed_at < as_of` cut out of the
+    database and into this process, so that predicate has to be pinned here.
+
+    Checked against the reader itself at every kind of instant that could
+    disagree — in particular an `as_of` landing *exactly* on a stored
+    `observed_at`, where a `<=` slip would leak one day of rain that had not
+    been published yet and would do it silently, since the number would still
+    look plausible."""
+    history_rows = _precip_history(range(2010, 2026), 12, 0.10)
+    reader = _FakeReader(history_rows)
+    hist = rain_calibration._StationHistory(
+        reader, "KNYC", TZ, datetime(2026, 6, 1, tzinfo=timezone.utc))
+
+    stamps = sorted(o.observed_at for o in history_rows)
+    probes = [stamps[0], stamps[0] - timedelta(microseconds=1),
+              stamps[0] + timedelta(microseconds=1),
+              stamps[len(stamps) // 2], stamps[-1],
+              stamps[-1] + timedelta(days=1),
+              datetime(2009, 1, 1, tzinfo=timezone.utc),
+              datetime(2017, 12, 14, 7, 31, tzinfo=timezone.utc)]
+    for as_of in probes:
+        want = climatology.collect_daily_precip(
+            reader.observations_before("KNYC", "precip", as_of), TZ)
+        got = hist.daily_before(as_of)
+        check(got == want,
+              f"slice disagrees with the reader at {as_of.isoformat()}: "
+              f"{len(got)} entries vs {len(want)}")
+
+    # the boundary stated explicitly, not just implied by the sweep above
+    check(hist.daily_before(stamps[0]) == {},
+          "an as_of exactly equal to the first observed_at must exclude it")
+    check(len(hist.daily_before(stamps[0] + timedelta(microseconds=1))) == 1,
+          "one microsecond later that same observation must be visible")
+
+
+def test_history_backed_probability_equals_reader_backed():
+    """The optimisation must be invisible in the numbers. If the two paths
+    ever diverge, every Brier score in the study is computed off a benchmark
+    that no test covers."""
+    rows = (_precip_history(range(2010, 2025), 12, 0.10)
+            + [WeatherObservationRow(_obs_at(date(2025, 12, d)), "KNYC",
+                                     "precip", 0.30, "iem-asos")
+               for d in range(1, 32)])
+    reader = _FakeReader(rows)
+    hist = rain_calibration._StationHistory(
+        reader, "KNYC", TZ, datetime(2026, 6, 1, tzinfo=timezone.utc))
+    spec = RainMarketSpec("KXRAINNYCM-25DEC-4", "KNYC", 2025, 12, 4.0)
+
+    for day in (1, 7, 14, 21, 28, 31):
+        as_of = datetime(2025, 12, day, 12, tzinfo=timezone.utc)
+        plain = rain_probability(reader, spec, as_of, TZ)
+        cached = rain_probability(reader, spec, as_of, TZ, history=hist)
+        check(plain == cached,
+              f"history-backed probability diverged on Dec {day}: "
+              f"{plain} vs {cached}")
+
+
 def test_probability_before_month_starts_uses_full_month_climatology():
     """Markets are listed weeks ahead of their month. With nothing accumulated
     the benchmark must still answer, from the whole-month climatology."""
@@ -276,6 +335,8 @@ def main() -> int:
         test_probability_uses_only_pre_as_of_observations,
         test_probability_none_when_station_history_too_short,
         test_probability_never_zero_or_one,
+        test_station_history_slice_matches_reader,
+        test_history_backed_probability_equals_reader_backed,
         test_probability_before_month_starts_uses_full_month_climatology,
         test_evaluate_scores_price_against_benchmark,
         test_evaluate_skips_markets_without_candles,
