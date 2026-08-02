@@ -203,6 +203,39 @@ class _StationHistory:
         return {d: v for _, d, v in self._entries[:i]}
 
 
+class _TokenCandles:
+    """One outcome token's candles, fetched **once** and sliced by `as_of`.
+
+    Exactly the argument `_StationHistory` makes, applied to the other half of
+    the walk. `store.candles_before` costs *two* remote round trips per call —
+    one to resolve the token to an outcome_id, one for the rows — and this
+    study asks for a price at every instant of every market's life. With 172
+    markets over a 75-day window at 24h steps that is ~12,900 calls, ~25,800
+    round trips against a Postgres in another region; the station-history fix
+    alone left the run past 20 minutes with nothing printed. Fetching each
+    token's history once turns 25,800 round trips into 344.
+
+    Same PIT obligation, same discharge: `before` applies `ts < as_of`
+    strictly, and only the *latest* candle is ever consumed, so the slice is
+    reduced to a single bisect with no list materialised."""
+
+    __slots__ = ("_times", "_candles")
+
+    def __init__(self, reader: Reader, token_id: str, horizon: datetime):
+        rows = sorted(reader.candles_before(token_id, horizon),
+                      key=lambda c: c.ts)
+        self._times = [c.ts for c in rows]
+        self._candles = rows
+
+    def latest_before(self, as_of: datetime):
+        """The most recent candle strictly before `as_of`, or None.
+
+        `evaluate` only ever took `max(candles, key=ts)`, so returning the last
+        element of the prefix is the same value without building the prefix."""
+        i = bisect.bisect_left(self._times, as_of)
+        return self._candles[i - 1] if i else None
+
+
 class _DailyMemo:
     """Per-run cache of the two *derived* quantities a rain probability needs:
     how much has accumulated in the target month so far, and the prior-year
@@ -343,11 +376,14 @@ def evaluate(reader: Reader, markets: list[RainMarket], *, start: datetime,
         market_type = f"{category}:precip:greater"
         used = False
         market_start = max(start, mkt.resolves_at - lookback)
+        # `_as_of_grid` caps every instant below `end`, so one fetch at `end`
+        # is a superset of every slice this market will ask for.
+        prices = _TokenCandles(reader, mkt.yes_token_id, end)
         for as_of in _as_of_grid(market_start, end, step, mkt.resolves_at):
-            candles = reader.candles_before(mkt.yes_token_id, as_of)
-            if not candles:
+            candle = prices.latest_before(as_of)
+            if candle is None:
                 continue
-            price = max(candles, key=lambda c: c.ts).close
+            price = candle.close
             p_forecast = rain_probability(reader, spec, as_of, tz,
                                           min_years=min_years, memo=memo,
                                           history=histories[spec.station])

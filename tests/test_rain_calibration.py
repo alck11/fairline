@@ -227,6 +227,38 @@ def test_station_history_slice_matches_reader():
           "one microsecond later that same observation must be visible")
 
 
+def test_token_candle_slice_picks_latest_strictly_before():
+    """`_TokenCandles` replaces `max(candles_before(...), key=ts)` with a
+    bisect, so it inherits the same `ts < as_of` obligation as
+    `_StationHistory`. A candle stamped exactly at `as_of` is a price that had
+    not printed yet."""
+    ts = [datetime(2025, 12, d, tzinfo=timezone.utc) for d in (5, 10, 15)]
+    candles = [Candle(t, "R-YES", 0.4, 0.4, 0.4, close, 10.0)
+               for t, close in zip(ts, (0.40, 0.50, 0.60))]
+    reader = _FakeReader((), candles)
+    tc = rain_calibration._TokenCandles(
+        reader, "R-YES", datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+    check(tc.latest_before(ts[0]) is None,
+          "an as_of exactly on the first candle must see no price yet")
+    check(tc.latest_before(datetime(2025, 12, 1, tzinfo=timezone.utc)) is None,
+          "before any candle there is no price")
+    check(tc.latest_before(ts[0] + timedelta(microseconds=1)).close == 0.40,
+          "just after the first candle, that candle is the price")
+    check(tc.latest_before(datetime(2025, 12, 12, tzinfo=timezone.utc)).close == 0.50,
+          "between candles the price is the older one, carried forward")
+    check(tc.latest_before(datetime(2026, 1, 1, tzinfo=timezone.utc)).close == 0.60,
+          "past the last candle the price is the last one")
+
+    # and it must agree with the max() it replaced, at every probe
+    for as_of in ts + [t + timedelta(hours=3) for t in ts]:
+        got = tc.latest_before(as_of)
+        raw = reader.candles_before("R-YES", as_of)
+        want = max(raw, key=lambda c: c.ts) if raw else None
+        check((got.close if got else None) == (want.close if want else None),
+              f"candle slice disagrees with max(candles_before) at {as_of}")
+
+
 def test_history_backed_probability_equals_reader_backed():
     """The optimisation must be invisible in the numbers. If the two paths
     ever diverge, every Brier score in the study is computed off a benchmark
@@ -336,6 +368,7 @@ def main() -> int:
         test_probability_none_when_station_history_too_short,
         test_probability_never_zero_or_one,
         test_station_history_slice_matches_reader,
+        test_token_candle_slice_picks_latest_strictly_before,
         test_history_backed_probability_equals_reader_backed,
         test_probability_before_month_starts_uses_full_month_climatology,
         test_evaluate_scores_price_against_benchmark,

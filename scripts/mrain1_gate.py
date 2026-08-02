@@ -58,11 +58,12 @@ def _collect(reader, markets, *, start, end, step, min_years, lookback):
         tz = ZoneInfo(weather_ingest.STATIONS[spec.station].tz)
         cluster = f"{spec.station}-{spec.year:04d}-{spec.month:02d}"
         market_start = max(start, mkt.resolves_at - lookback)
+        prices = rain_calibration._TokenCandles(reader, mkt.yes_token_id, end)
         for as_of in _as_of_grid(market_start, end, step, mkt.resolves_at):
-            candles = reader.candles_before(mkt.yes_token_id, as_of)
-            if not candles:
+            candle = prices.latest_before(as_of)
+            if candle is None:
                 continue
-            price = float(max(candles, key=lambda c: c.ts).close)
+            price = float(candle.close)
             p = rain_calibration.rain_probability(
                 reader, spec, as_of, tz, min_years=min_years, memo=memo,
                 history=histories[spec.station])
