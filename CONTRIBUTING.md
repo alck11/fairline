@@ -64,7 +64,7 @@ pre-commit install
    git commit -m "Brief summary
 
    Longer explanation if needed. Reference ADRs, WP numbers, or issues.
-   
+
    Co-Authored-By: Your Name <your.email@example.com>"
    ```
 
@@ -109,7 +109,7 @@ from ingest import MarketRow
 # Type hints are expected on public functions
 def upsert_market(conn: Connection, row: MarketRow) -> int:
     """Store a market row, return market_id.
-    
+
     Idempotent on (venue, external_id): re-running with the same market
     updates the row in place, never duplicates.
     """
@@ -132,7 +132,7 @@ def _parse_field(value: str | None) -> float | None:
 ```python
 def candlesticks(self, token_id: str, *, start: datetime, end: datetime) -> list[Candle]:
     """Fetch candlesticks for a token in a time range.
-    
+
     start and end must be timezone-aware datetimes (UTC recommended).
     Returns candlesticks in chronological order, oldest first.
     """

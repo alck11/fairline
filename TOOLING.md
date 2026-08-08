@@ -318,4 +318,3 @@ pytest tests --cov=src.store --cov-report=term-missing
 - [mypy.readthedocs.io](https://mypy.readthedocs.io/) — mypy documentation
 - [pytest.org](https://pytest.org/) — pytest documentation
 - [pre-commit.com](https://pre-commit.com/) — pre-commit documentation
-

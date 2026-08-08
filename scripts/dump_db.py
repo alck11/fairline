@@ -84,12 +84,15 @@ def main(argv: list[str] | None = None) -> int:
     for t in tables:
         n = conn.execute(f'SELECT count(*) FROM public."{t}"').fetchone()[0]
         path = os.path.join(dest, f"{t}.csv.gz")
-        with gzip.open(path, "wb") as fh:
-            with conn.cursor().copy(
-                    f'COPY (SELECT * FROM public."{t}") TO STDOUT '
-                    f'WITH (FORMAT csv, HEADER true)') as copy:
-                for chunk in copy:
-                    fh.write(bytes(chunk))
+        with (
+            gzip.open(path, "wb") as fh,
+            conn.cursor().copy(
+                f'COPY (SELECT * FROM public."{t}") TO STDOUT '
+                f"WITH (FORMAT csv, HEADER true)"
+            ) as copy,
+        ):
+            for chunk in copy:
+                fh.write(bytes(chunk))
         manifest["tables"].append({
             "table": t, "rows": n,
             "bytes_gz": os.path.getsize(path),

@@ -115,5 +115,5 @@ WP-7 shipped (commit d0fdf52) and passed initial review. A second full review (c
 
 ---
 
-**Audited by:** Claude Code (2026-07-21)  
+**Audited by:** Claude Code (2026-07-21)
 **Commits:** d0fdf52 (WP-7 initial), 5368650 (hardened strike parser), daea1a4 (docs)

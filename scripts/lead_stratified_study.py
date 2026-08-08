@@ -81,11 +81,11 @@ class PreloadingReader:
             "SELECT ot.token_id, c.ts, c.open, c.high, c.low, c.close, c.volume "
             "FROM candlestick c JOIN outcome_token ot ON ot.outcome_id = c.outcome_id "
             "ORDER BY ot.token_id, c.ts").fetchall()
-        for tok, ts, o, h, l, cl, v in rows:
+        for tok, ts, o, h, lo, cl, v in rows:
             self._c.setdefault(tok, ([], []))
             keys, vals = self._c[tok]
             keys.append(ts)
-            vals.append(Candle(ts, tok, float(o), float(h), float(l), float(cl),
+            vals.append(Candle(ts, tok, float(o), float(h), float(lo), float(cl),
                                float(v) if v is not None else None))
 
         f = conn.execute(

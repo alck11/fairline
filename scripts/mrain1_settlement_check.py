@@ -41,6 +41,36 @@ import store  # noqa: E402
 import weather_ingest  # noqa: E402
 
 
+def _evaluate_markets(markets, daily):
+    agree: dict[str, int] = defaultdict(int)
+    checkable: dict[str, int] = defaultdict(int)
+    nodata: dict[str, int] = defaultdict(int)
+    total: dict[str, int] = defaultdict(int)
+    series_of: dict[str, set] = defaultdict(set)
+    mismatches = []
+    for m in markets:
+        s = m.spec
+        d = daily.get(s.station, {})
+        n_days = calendar.monthrange(s.year, s.month)[1]
+        present = [
+            d[date(s.year, s.month, k)]
+            for k in range(1, n_days + 1)
+            if date(s.year, s.month, k) in d
+        ]
+        total[s.station] += 1
+        series_of[s.station].add(s.external_id.split("-")[0])
+        if len(present) < n_days:
+            nodata[s.station] += 1
+            continue
+        checkable[s.station] += 1
+        month_total = sum(present)
+        if s.yes_outcome(month_total) == m.resolved_y:
+            agree[s.station] += 1
+        else:
+            mismatches.append((s, month_total, m.resolved_y))
+    return agree, checkable, nodata, total, series_of, mismatches
+
+
 def main() -> int:
     conn = store.connect()
     markets = rain_calibration.load_rain_markets(conn)
@@ -57,39 +87,14 @@ def main() -> int:
         # start of the next local day, which is when these markets resolve)
         # and manufacture a "missing day" on every single market.
         rows = store.observations_before(
-            conn, st, climatology.PRECIP_VARIABLE, _FOREVER)
+            conn, st, climatology.PRECIP_VARIABLE, _FOREVER
+        )
         daily[st] = climatology.collect_daily_precip(rows, tz)
     conn.close()
 
-    # "we have no data for that month" and "our data says the opposite of what
-    # Kalshi settled" are different findings and must not be added together.
-    # The first is an ingest gap and says nothing about the mapping; the second
-    # is the mapping being wrong. Pooling them made every un-backfilled station
-    # read as a mis-mapping, which is the sort of false alarm that trains you
-    # to ignore the check.
-    agree: dict[str, int] = defaultdict(int)
-    checkable: dict[str, int] = defaultdict(int)
-    nodata: dict[str, int] = defaultdict(int)
-    total: dict[str, int] = defaultdict(int)
-    series_of: dict[str, set] = defaultdict(set)
-    mismatches = []
-    for m in markets:
-        s = m.spec
-        d = daily.get(s.station, {})
-        n_days = calendar.monthrange(s.year, s.month)[1]
-        present = [d[date(s.year, s.month, k)] for k in range(1, n_days + 1)
-                   if date(s.year, s.month, k) in d]
-        total[s.station] += 1
-        series_of[s.station].add(s.external_id.split("-")[0])
-        if len(present) < n_days:
-            nodata[s.station] += 1
-            continue
-        checkable[s.station] += 1
-        month_total = sum(present)
-        if s.yes_outcome(month_total) == m.resolved_y:
-            agree[s.station] += 1
-        else:
-            mismatches.append((s, month_total, m.resolved_y))
+    agree, checkable, nodata, total, series_of, mismatches = _evaluate_markets(
+        markets, daily
+    )
 
     print(f"{'station':<8} {'series':<14} {'reproduced':>16}  {'no data':>8}")
     print("-" * 52)
