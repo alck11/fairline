@@ -51,3 +51,8 @@ tests/.pgserver-test-data*/
 *.bak
 .tmp/
 tmp/
+
+# Collector/operational logs — mutate continuously while background
+# processes run (e.g. scripts/maker1_collect.py); not source, don't churn
+# the repo on every commit.
+logs/
