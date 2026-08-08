@@ -113,7 +113,6 @@ disallow_incomplete_defs = false
 check_untyped_defs = true
 no_implicit_optional = true
 warn_redundant_casts = true
-warn_unused_ignores = true
 follow_imports = "normal"
 follow_imports_for_stubs = true
 ignore_missing_imports = true

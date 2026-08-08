@@ -292,6 +292,17 @@ class KalshiSource:
             f"Kalshi API unreachable after {self.max_retries} attempt(s): "
             f"{url} ({type(last_err).__name__}: {last_err})") from last_err
 
+    def get_json(self, path: str, **params) -> dict:
+        """Public passthrough to this source's retrying JSON GET.
+
+        Exists so modules covering endpoints outside the `MarketDataSource`
+        Protocol -- `incentives.py` and `/incentive_programs` today -- reuse
+        the retry/backoff and error contract every other adapter here follows
+        (ADR-0006 US-2) instead of hand-rolling a second HTTP path. It adds no
+        behaviour of its own; `_get` stays the single implementation.
+        """
+        return self._get(path, **params)
+
     @staticmethod
     def _dollars(s: str | None) -> float | None:
         if s in (None, ""):
